@@ -664,6 +664,7 @@ gr::property_map parse_settings_reply(const gr::Message& reply, std::string_view
 
 struct Gr4RuntimeManager::Execution {
     std::shared_ptr<gr::SchedulerModel> scheduler;
+    gr::MsgPortInBuiltin errorSink;
     bool running{false};
 };
 
@@ -741,7 +742,15 @@ void Gr4RuntimeManager::start(const domain::Session& session) {
     resources->teardown_error.reset();
     resources->teardown_complete = false;
     resources->lifecycle_phase = LifecyclePhase::Starting;
-    execution.scheduler->start();
+    try {
+        execution.scheduler->start();
+    } catch (const std::exception& error) {
+        execution.running = false;
+        resources->lifecycle_phase = LifecyclePhase::Failed;
+        throw runtime_error(session, "start", error.what());
+    }
+    // drain early runtime errors (block init failures, etc.) and propagate to session state
+    drain_errors_locked(*resources);
     execution.running = true;
     resources->lifecycle_phase = LifecyclePhase::Running;
 }
@@ -1015,12 +1024,42 @@ Gr4RuntimeManager::Execution& Gr4RuntimeManager::prepare_locked(const domain::Se
     auto execution = std::make_unique<Execution>();
     try {
         auto graph = gr::loadGrc(gr::globalPluginLoader(), normalize_graph_content(session.grc_content, stream_bindings));
+
+        // pre-flight edge validation — catch port type mismatches before scheduler start
+        {
+            auto& grc_graph = *graph;
+            auto fmt_pd = [](const gr::PortDefinition& pd) -> std::string {
+                if (auto* idx = std::get_if<gr::PortDefinition::IndexBased>(&pd.definition)) {
+                    return std::to_string(idx->topLevel);
+                }
+                return std::get<gr::PortDefinition::StringBased>(pd.definition).name;
+            };
+            for (const auto& edge : grc_graph.edges()) {
+                const auto st = edge.state();
+                if (st == gr::Edge::EdgeState::ErrorConnecting || st == gr::Edge::EdgeState::IncompatiblePorts || st == gr::Edge::EdgeState::PortNotFound) {
+                    const auto src_blk = edge.sourceBlock() ? edge.sourceBlock()->uniqueName() : "?";
+                    const auto dst_blk = edge.destinationBlock() ? edge.destinationBlock()->uniqueName() : "?";
+                    const auto src_prt = fmt_pd(edge.sourcePortDefinition());
+                    const auto dst_prt = fmt_pd(edge.destinationPortDefinition());
+                    throw std::runtime_error(std::format(
+                        "edge '{}' between {}/{} -> {}/{} has incompatible port types (state={})",
+                        edge.name(), src_blk, src_prt, dst_blk, dst_prt, static_cast<int>(st)));
+                }
+            }
+        }
+
         const auto scheduler_alias = session.scheduler_alias.value_or(default_scheduler_alias());
         execution->scheduler = gr::globalPluginLoader().instantiateScheduler(scheduler_alias);
         if (!execution->scheduler) {
             throw runtime_error(session, "prepare", "scheduler not found: " + scheduler_alias);
         }
         execution->scheduler->setGraph(std::move(*graph));
+
+        // subscribe to scheduler error messages — prevents terminate() on block-level errors
+        if (auto conn = execution->scheduler->msgOut->connect(execution->errorSink); !connection_succeeded(conn)) {
+            std::cerr << "[gr4cp] warning: failed to connect scheduler error sink: "
+                      << connection_error_message(conn) << '\n';
+        }
     } catch (const std::exception& error) {
         for (const auto& binding : stream_bindings) {
             stream_allocator_.release(binding.internal);
@@ -1044,6 +1083,28 @@ void Gr4RuntimeManager::release_stream_bindings_locked(SessionRuntimeResources& 
     resources.stream_bindings.clear();
 }
 
+
+void Gr4RuntimeManager::drain_errors_locked(SessionRuntimeResources& resources) {
+    auto* execution = resources.execution.get();
+    if (!execution) {
+        return;
+    }
+    const auto n = execution->errorSink.streamReader().available();
+    if (n == 0UZ) {
+        return;
+    }
+    auto msgs = execution->errorSink.streamReader().get<gr::SpanReleasePolicy::ProcessAll>(n);
+    for (const auto& msg : msgs) {
+        if (!msg.data.has_value()) {
+            const auto err_msg = msg.data.error().message;
+            std::cerr << "[gr4cp] session " << resources.session_id << " runtime error: " << err_msg << '\n';
+            if (!resources.async_error.has_value()) {
+                resources.async_error = err_msg;
+            }
+        }
+    }
+}
+
 void Gr4RuntimeManager::stop_locked(const domain::Session& session,
                                     SessionRuntimeResources& resources,
                                     std::unique_lock<std::mutex>& lock) {
@@ -1065,6 +1126,8 @@ void Gr4RuntimeManager::stop_locked(const domain::Session& session,
     resources.lifecycle_phase = LifecyclePhase::Stopping;
     resources.teardown_complete = false;
     resources.teardown_error.reset();
+
+    drain_errors_locked(resources);
 
     if (execution->running) {
         try {

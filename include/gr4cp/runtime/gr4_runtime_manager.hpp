@@ -49,6 +49,7 @@ private:
     std::shared_ptr<SessionRuntimeResources> find_resources(const std::string& session_id);
     Execution& prepare_locked(const domain::Session& session, SessionRuntimeResources& resources);
     void release_stream_bindings_locked(SessionRuntimeResources& resources);
+    void drain_errors_locked(SessionRuntimeResources& resources);
     void stop_locked(const domain::Session& session,
                      SessionRuntimeResources& resources,
                      std::unique_lock<std::mutex>& lock);
