@@ -177,6 +177,7 @@ Json session_to_json(const domain::Session& session, const std::optional<domain:
         {"created_at", domain::format_timestamp_utc(session.created_at)},
         {"updated_at", domain::format_timestamp_utc(session.updated_at)},
         {"last_error", session.last_error ? Json(*session.last_error) : Json(nullptr)},
+        {"grc_content", session.grc_content},
     };
 
     if (session.scheduler_alias.has_value()) {
