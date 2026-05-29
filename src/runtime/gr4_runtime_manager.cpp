@@ -678,6 +678,8 @@ struct Gr4RuntimeManager::SessionRuntimeResources {
     std::unique_ptr<Execution> execution;
     std::vector<domain::RuntimeStreamBinding> stream_bindings;
     std::mutex mutex;
+    std::atomic<bool> drain_active{false};
+    std::thread drain_thread;
 };
 
 Gr4RuntimeManager::Gr4RuntimeManager(std::vector<std::filesystem::path> plugin_directories)
@@ -751,6 +753,20 @@ void Gr4RuntimeManager::start(const domain::Session& session) {
     }
     // drain early runtime errors (block init failures, etc.) and propagate to session state
     drain_errors_locked(*resources);
+
+    // launch background error drain thread — prevents errorSink buffer from filling up
+    if (!resources->drain_active.exchange(true)) {
+        resources->drain_thread = std::thread([resources]() {
+            while (resources->drain_active.load()) {
+                {
+                    std::lock_guard<std::mutex> lock(resources->mutex);
+                    drain_errors_locked(*resources);
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            }
+        });
+    }
+
     execution.running = true;
     resources->lifecycle_phase = LifecyclePhase::Running;
 }
@@ -1129,6 +1145,12 @@ void Gr4RuntimeManager::stop_locked(const domain::Session& session,
     resources.lifecycle_phase = LifecyclePhase::Stopping;
     resources.teardown_complete = false;
     resources.teardown_error.reset();
+
+    // stop background drain thread
+    resources.drain_active.store(false);
+    if (resources.drain_thread.joinable()) {
+        resources.drain_thread.join();
+    }
 
     drain_errors_locked(resources);
 
