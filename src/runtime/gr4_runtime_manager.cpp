@@ -1056,10 +1056,13 @@ Gr4RuntimeManager::Execution& Gr4RuntimeManager::prepare_locked(const domain::Se
         execution->scheduler->setGraph(std::move(*graph));
 
         // subscribe to scheduler error messages — prevents terminate() on block-level errors
-        if (auto conn = execution->scheduler->msgOut->connect(execution->errorSink); !connection_succeeded(conn)) {
-            std::cerr << "[gr4cp] warning: failed to connect scheduler error sink: "
-                      << connection_error_message(conn) << '\n';
+        if (auto* blk = execution->scheduler->asBlockModel(); blk) {
+            if (auto conn = blk->msgOut->connect(execution->errorSink); !connection_succeeded(conn)) {
+                std::cerr << "[gr4cp] warning: failed to connect scheduler error sink: "
+                          << connection_error_message(conn) << '\n';
+            }
         }
+
     } catch (const std::exception& error) {
         for (const auto& binding : stream_bindings) {
             stream_allocator_.release(binding.internal);
