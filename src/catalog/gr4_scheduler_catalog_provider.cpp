@@ -242,6 +242,9 @@ std::vector<domain::SchedulerDescriptor> Gr4SchedulerCatalogProvider::list() con
     }
 
     auto scheduler_ids = loader.availableSchedulers();
+    // Also include built-in schedulers from the global registry (baked in).
+    auto builtin = gr::globalSchedulerRegistry().keys();
+    scheduler_ids.insert(scheduler_ids.end(), builtin.begin(), builtin.end());
     std::sort(scheduler_ids.begin(), scheduler_ids.end());
     scheduler_ids.erase(std::unique(scheduler_ids.begin(), scheduler_ids.end()), scheduler_ids.end());
     scheduler_ids.erase(std::remove_if(scheduler_ids.begin(), scheduler_ids.end(),
