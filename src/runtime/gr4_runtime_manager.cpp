@@ -756,7 +756,7 @@ void Gr4RuntimeManager::start(const domain::Session& session) {
 
     // launch background error drain thread — prevents errorSink buffer from filling up
     if (!resources->drain_active.exchange(true)) {
-        resources->drain_thread = std::thread([resources]() {
+        resources->drain_thread = std::thread([this, resources]() {
             while (resources->drain_active.load()) {
                 {
                     std::lock_guard<std::mutex> lock(resources->mutex);
