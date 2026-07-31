@@ -11,7 +11,9 @@
 
 #include <cstdlib>
 #include <exception>
+#include <fstream>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 
 #include <httplib.h>
@@ -37,6 +39,22 @@ namespace {
     std::abort();
 }
 
+void write_port_file(const char* path, int port) {
+    if (path == nullptr || path[0] == '\0') {
+        return;
+    }
+
+    std::ofstream output(path, std::ios::trunc);
+    if (!output) {
+        throw std::runtime_error(std::string("failed to open GR4CP_PORT_FILE: ") + path);
+    }
+    output << port << '\n';
+    output.close();
+    if (!output) {
+        throw std::runtime_error(std::string("failed to write GR4CP_PORT_FILE: ") + path);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -58,6 +76,26 @@ int main() {
         gr4cp::catalog::Gr4SchedulerCatalogProvider scheduler_catalog_provider;
         gr4cp::app::SchedulerCatalogService scheduler_catalog_service(scheduler_catalog_provider);
 
+        gr4cp::api::HttpServer server(session_service,
+                                      session_stream_service,
+                                      block_catalog_service,
+                                      scheduler_catalog_service,
+                                      block_settings_service);
+
+        const char* port_env = std::getenv("GR4CP_PORT");
+        const int requested_port = port_env != nullptr ? std::stoi(port_env) : 8080;
+        int listen_port = requested_port;
+
+        if (requested_port == 0) {
+            listen_port = server.bind_to_any_port("127.0.0.1");
+            if (listen_port <= 0) {
+                std::cerr << "gr4cp_server: failed to reserve an available loopback port\n";
+                return 1;
+            }
+            write_port_file(std::getenv("GR4CP_PORT_FILE"), listen_port);
+            std::cout << "Reserved 127.0.0.1:" << listen_port << '\n';
+        }
+
         try {
             (void)block_catalog_service.list();
             (void)scheduler_catalog_service.list();
@@ -71,18 +109,13 @@ int main() {
             return 1;
         }
 
-        gr4cp::api::HttpServer server(session_service,
-                                      session_stream_service,
-                                      block_catalog_service,
-                                      scheduler_catalog_service,
-                                      block_settings_service);
-
-        const char* port_env = std::getenv("GR4CP_PORT");
-        const int port = port_env != nullptr ? std::stoi(port_env) : 8080;
-
-        std::cout << "Listening on 0.0.0.0:" << port << '\n';
-        if (!server.listen("0.0.0.0", port)) {
-            std::cerr << "gr4cp_server: HTTP server stopped because listen failed on 0.0.0.0:" << port << '\n';
+        const std::string listen_host = requested_port == 0 ? "127.0.0.1" : "0.0.0.0";
+        std::cout << "Listening on " << listen_host << ':' << listen_port << '\n';
+        const bool listened =
+            requested_port == 0 ? server.listen_after_bind() : server.listen(listen_host, listen_port);
+        if (!listened) {
+            std::cerr << "gr4cp_server: HTTP server stopped because listen failed on " << listen_host << ':'
+                      << listen_port << '\n';
             return 1;
         }
         return 0;

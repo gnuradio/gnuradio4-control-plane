@@ -44,7 +44,7 @@ std::vector<std::filesystem::path> default_plugin_directories() {
         return split_plugin_directories(env);
     }
 #if defined(GR4CP_DEFAULT_GNURADIO4_PLUGIN_DIR)
-    return {std::filesystem::path(GR4CP_DEFAULT_GNURADIO4_PLUGIN_DIR)};
+    return split_plugin_directories(GR4CP_DEFAULT_GNURADIO4_PLUGIN_DIR);
 #else
     return {};
 #endif

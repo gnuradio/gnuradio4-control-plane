@@ -157,7 +157,7 @@ if(GR4CP_HAVE_GNURADIO4)
     target_compile_definitions(gr4cp_core
         PUBLIC
             GR4CP_HAVE_GNURADIO4
-            GR4CP_DEFAULT_GNURADIO4_PLUGIN_DIR="${GR4CP_GNURADIO4_LIB_DIR}"
+            GR4CP_DEFAULT_GNURADIO4_PLUGIN_DIR="${GR4CP_GNURADIO4_LIB_DIR}/gnuradio-4/plugins:${GR4CP_GNURADIO4_LIB_DIR}"
     )
     set(GR4CP_GNURADIO4_TARGETS
         gnuradio4::gnuradio-core
@@ -236,6 +236,23 @@ add_executable(gr4cp_cli_exec
 )
 
 set_target_properties(gr4cp_cli_exec PROPERTIES OUTPUT_NAME gr4cp-cli)
+
+if(APPLE)
+    set(_gr4cp_executable_install_rpath "@loader_path/../${CMAKE_INSTALL_LIBDIR}")
+    set(_gr4cp_library_install_rpath "@loader_path")
+elseif(UNIX)
+    set(_gr4cp_executable_install_rpath "\$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
+    set(_gr4cp_library_install_rpath "\$ORIGIN")
+endif()
+
+if(DEFINED _gr4cp_executable_install_rpath)
+    set_target_properties(gr4cp_server gr4cp_cli_exec PROPERTIES
+        INSTALL_RPATH "${_gr4cp_executable_install_rpath}"
+    )
+    set_target_properties(gr4cp_core gr4cp_cli PROPERTIES
+        INSTALL_RPATH "${_gr4cp_library_install_rpath}"
+    )
+endif()
 
 target_link_libraries(gr4cp_cli_exec
     PRIVATE
@@ -324,8 +341,10 @@ else()
     gtest_discover_tests(gr4cp_cli_test)
 endif()
 
-install(TARGETS gr4cp_server gr4cp_cli_exec
+install(TARGETS gr4cp_core gr4cp_cli gr4cp_server gr4cp_cli_exec
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 
 install(DIRECTORY include/gr4cp/

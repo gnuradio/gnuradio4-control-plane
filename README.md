@@ -64,6 +64,16 @@ Built executables:
 - `build/gr4cp_server`
 - `build/gr4cp-cli`
 
+Install the runtime with:
+
+```bash
+cmake --install build --prefix /path/to/prefix
+```
+
+The install includes `libgr4cp_core` and `libgr4cp_cli`. The installed server
+and CLI use relative runtime paths to find those libraries under the same
+prefix, so they do not depend on the build tree.
+
 ## Run The Server
 
 ```bash
@@ -75,6 +85,16 @@ The server listens on `0.0.0.0:8080` by default. Override the port with `GR4CP_P
 ```bash
 GR4CP_PORT=8090 ./build/gr4cp_server
 ```
+
+Launchers can request an available loopback port and receive the selected port
+through a file. The server reserves the socket before loading the catalogs, so
+the port cannot be taken while startup is in progress:
+
+```bash
+GR4CP_PORT=0 GR4CP_PORT_FILE=/tmp/gr4cp.port ./build/gr4cp_server
+```
+
+`GR4CP_PORT_FILE` is only used when `GR4CP_PORT=0`.
 
 Temporary health check:
 
