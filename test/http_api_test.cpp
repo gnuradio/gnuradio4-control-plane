@@ -118,7 +118,13 @@ public:
                 .summary = "Adds two float streams",
                 .inputs = {{"in0", "float"}, {"in1", "float"}},
                 .outputs = {{"out", "float"}},
-                .parameters = {{"scale", "float", false, 1.0, ""}},
+                .parameters = {[] {
+                    gr4cp::domain::BlockParameterDescriptor parameter("scale", "float", false, 1.0, "Scale factor");
+                    parameter.runtime_mutability = "mutable";
+                    parameter.value_kind = "scalar";
+                    parameter.ui_hint = "advanced";
+                    return parameter;
+                }()},
             },
             {
                 .id = "blocks.analog.wfm_rcv",
@@ -1049,6 +1055,10 @@ TEST_F(HttpApiTest, GetBlockByIdIncludesExtendedParameterMetadataWhenAvailable) 
     const auto body = parse_json(response);
     ASSERT_EQ(body["parameters"].size(), 1U);
     const auto& parameter = body["parameters"][0];
+    ASSERT_TRUE(parameter.contains("summary"));
+    ASSERT_TRUE(parameter.contains("runtime_mutability"));
+    ASSERT_TRUE(parameter.contains("value_kind"));
+    ASSERT_TRUE(parameter.contains("ui_hint"));
     EXPECT_EQ(parameter["summary"], "Scale factor");
     EXPECT_EQ(parameter["runtime_mutability"], "mutable");
     EXPECT_EQ(parameter["value_kind"], "scalar");
@@ -1085,7 +1095,11 @@ TEST_F(HttpApiTest, GetBlockByEncodedIdSuccess) {
 
     const auto body = parse_json(response);
     EXPECT_EQ(body["id"], id);
-    ASSERT_EQ(body["inputs"].size(), 2U);
+    ASSERT_EQ(body["inputs"].size(), 1U);
+    ASSERT_TRUE(body["inputs"][0].contains("cardinality_kind"));
+    ASSERT_TRUE(body["inputs"][0].contains("current_port_count"));
+    EXPECT_EQ(body["inputs"][0]["cardinality_kind"], "dynamic");
+    EXPECT_EQ(body["inputs"][0]["current_port_count"], 2);
     ASSERT_EQ(body["parameters"].size(), 1U);
 }
 

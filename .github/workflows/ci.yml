@@ -1,0 +1,83 @@
+name: Control-plane CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "29 6 * * *"
+  workflow_dispatch:
+    inputs:
+      cmake_options:
+        description: Space-separated CMake -D overrides for dependency repositories and refs
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CMAKE_BUILD_PARALLEL_LEVEL: "4"
+  DISABLE_SENSITIVE_TESTS: "1"
+  GR4_CI_SUPER_REF: 2d370118ed78ad0a31cdfdc40ebff317d8d94875
+  GR4_CI_CORE_REF: c35f5c8e41dbb482c86597bc1e5607140010fad2
+  GR4_CI_LIBRARY_REF: d2e67c0bfa4ac35fe16dfeb01f3727754fcad1d3
+  GR4_CI_BLOCKS_REF: fb7d98f1ea07f0a3d05b35cf6bc2cc80443e7df5
+
+jobs:
+  integration:
+    name: Ubuntu 24.04 | GCC 14 | control-plane integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    container:
+      image: ghcr.io/gnuradio/ci:ubuntu-24.04-4.0
+
+    env:
+      CC: gcc-14
+      CXX: g++-14
+
+    steps:
+      - name: Check out the integration harness
+        uses: actions/checkout@v6
+        with:
+          repository: mormj/gr4-super
+          ref: ${{ env.GR4_CI_SUPER_REF }}
+          path: integration
+
+      - name: Check out control-plane
+        uses: actions/checkout@v6
+        with:
+          path: integration/src/gnuradio4-control-plane
+
+      - name: Configure
+        working-directory: integration
+        shell: bash
+        env:
+          CMAKE_OPTIONS: ${{ inputs.cmake_options }}
+          USE_LATEST_REVISIONS: ${{ github.event_name == 'schedule' }}
+        run: |
+          cmake_args=(
+            --preset ci
+            -DGR4_MODULES=gnuradio4-control-plane
+          )
+          if [[ "${USE_LATEST_REVISIONS}" != "true" ]]; then
+            cmake_args+=(
+              "-DGR4_CORE_REF=${GR4_CI_CORE_REF}"
+              "-DGR4_LIBRARY_REF=${GR4_CI_LIBRARY_REF}"
+              "-DGR4_BLOCKS_REF=${GR4_CI_BLOCKS_REF}"
+            )
+          fi
+          if [[ -n "${CMAKE_OPTIONS}" ]]; then
+            read -r -a overrides <<< "${CMAKE_OPTIONS}"
+            cmake_args+=("${overrides[@]}")
+          fi
+          cmake "${cmake_args[@]}"
+
+      - name: Build and test control-plane with its dependencies
+        working-directory: integration
+        run: cmake --build --preset ci --target check

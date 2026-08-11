@@ -44,7 +44,7 @@ bool is_better_browse_entry(const domain::BlockDescriptor& candidate, const doma
         return !candidate_is_impl;
     }
     if (candidate.id.size() != current.id.size()) {
-        return candidate.id.size() > current.id.size();
+        return candidate.id.size() < current.id.size();
     }
     if (candidate.category != current.category) {
         return candidate.category < current.category;

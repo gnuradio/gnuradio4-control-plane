@@ -94,10 +94,10 @@ TEST(Gr4BlockCatalogProviderTest, ProviderUsesNamespacePathFallbackCategoryWhenN
     }
 
     const auto signal_generator = std::find_if(blocks.begin(), blocks.end(), [](const auto& block) {
-        return block.id == "gr::basic::SignalGenerator<float32>";
+        return block.id == "gr::blocks::basic::SignalGenerator<float32>";
     });
     ASSERT_NE(signal_generator, blocks.end());
-    EXPECT_EQ(signal_generator->category, "basic");
+    EXPECT_EQ(signal_generator->category, "blocks/basic");
 }
 
 TEST(Gr4BlockCatalogProviderTest, BlockDetailsIncludeBuiltinParametersAndExtendedMetadata) {
@@ -111,7 +111,7 @@ TEST(Gr4BlockCatalogProviderTest, BlockDetailsIncludeBuiltinParametersAndExtende
     }
 
     const auto block_it = std::find_if(blocks.begin(), blocks.end(), [](const auto& block) {
-        return block.id == "gr::basic::SignalGenerator<float32>";
+        return block.id == "gr::blocks::basic::SignalGenerator<float32>";
     });
     ASSERT_NE(block_it, blocks.end());
     EXPECT_FALSE(block_it->summary.empty());
@@ -142,21 +142,21 @@ TEST(Gr4BlockCatalogProviderTest, BlockDetailsIncludeBuiltinParametersAndExtende
     ASSERT_NE(ui_constraints, nullptr);
 
     EXPECT_EQ(unique_name->runtime_mutability, std::optional<std::string>("immutable"));
-    EXPECT_EQ(compute_domain->runtime_mutability, std::optional<std::string>("immutable"));
-    EXPECT_EQ(disconnect_on_done->runtime_mutability, std::optional<std::string>("immutable"));
-    EXPECT_EQ(input_chunk_size->runtime_mutability, std::optional<std::string>("immutable"));
-    EXPECT_EQ(output_chunk_size->runtime_mutability, std::optional<std::string>("immutable"));
-    EXPECT_EQ(stride->runtime_mutability, std::optional<std::string>("immutable"));
+    EXPECT_FALSE(compute_domain->runtime_mutability.has_value());
+    EXPECT_FALSE(disconnect_on_done->runtime_mutability.has_value());
+    EXPECT_FALSE(input_chunk_size->runtime_mutability.has_value());
+    EXPECT_FALSE(output_chunk_size->runtime_mutability.has_value());
+    EXPECT_FALSE(stride->runtime_mutability.has_value());
     EXPECT_EQ(name->runtime_mutability, std::optional<std::string>("immutable"));
-    EXPECT_EQ(ui_constraints->runtime_mutability, std::optional<std::string>("immutable"));
+    EXPECT_FALSE(ui_constraints->runtime_mutability.has_value());
 
-    EXPECT_EQ(unique_name->ui_hint, std::optional<std::string>("advanced"));
+    EXPECT_EQ(unique_name->ui_hint, std::optional<std::string>("read_only"));
     EXPECT_EQ(compute_domain->ui_hint, std::optional<std::string>("advanced"));
     EXPECT_EQ(disconnect_on_done->ui_hint, std::optional<std::string>("advanced"));
     EXPECT_EQ(input_chunk_size->ui_hint, std::optional<std::string>("advanced"));
     EXPECT_EQ(output_chunk_size->ui_hint, std::optional<std::string>("advanced"));
     EXPECT_EQ(stride->ui_hint, std::optional<std::string>("advanced"));
-    EXPECT_EQ(name->ui_hint, std::optional<std::string>("advanced"));
+    EXPECT_EQ(name->ui_hint, std::optional<std::string>("read_only"));
     EXPECT_EQ(ui_constraints->ui_hint, std::optional<std::string>("advanced"));
 
     const auto* amplitude = parameter_by_name("amplitude");
