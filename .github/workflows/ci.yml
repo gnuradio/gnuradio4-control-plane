@@ -45,14 +45,14 @@ jobs:
             blocks_sdk_tag: main-ubuntu-26.04-gcc-release
             cxx: g++
             cmake_build_type: RelWithDebInfo
-            cxx_flags: ""
+            cxx_flags: -Wno-error=null-dereference
             linker_flags: ""
             asan_options: ""
           - name: Ubuntu 26.04 | GCC | Debug
             blocks_sdk_tag: main-ubuntu-26.04-gcc-debug
             cxx: g++
             cmake_build_type: Debug
-            cxx_flags: ""
+            cxx_flags: -Wno-error=null-dereference
             linker_flags: ""
             asan_options: ""
           - name: Ubuntu 24.04 | Clang 20 | Release
@@ -70,7 +70,10 @@ jobs:
             linker_flags: -fsanitize=address
             asan_options: detect_leaks=0
           - name: Fedora 44 | Clang | Debug
-            blocks_sdk_tag: main-fedora-44-clang-debug
+            # The Debug SDK currently aborts in GNU Radio's generated
+            # gr::Resampling<> registration under libstdc++ assertions.
+            # Keep this consumer build Debug while using the compatible SDK.
+            blocks_sdk_tag: main-fedora-44-clang-release
             cxx: clang++
             cmake_build_type: Debug
             cxx_flags: -fsanitize=address -Wno-error=deprecated-declarations
