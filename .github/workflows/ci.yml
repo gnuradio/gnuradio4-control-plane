@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       cmake_options:
-        description: Space-separated CMake -D overrides for dependency repositories and refs
+        description: Space-separated CMake -D overrides
         required: false
         default: ""
 
@@ -24,52 +24,92 @@ concurrency:
 env:
   CMAKE_BUILD_PARALLEL_LEVEL: "4"
   DISABLE_SENSITIVE_TESTS: "1"
-  GR4_CI_SUPER_REF: 2d370118ed78ad0a31cdfdc40ebff317d8d94875
-  GR4_CI_CORE_REF: c35f5c8e41dbb482c86597bc1e5607140010fad2
-  GR4_CI_LIBRARY_REF: d2e67c0bfa4ac35fe16dfeb01f3727754fcad1d3
-  GR4_CI_BLOCKS_REF: fb7d98f1ea07f0a3d05b35cf6bc2cc80443e7df5
 
 jobs:
   integration:
-    name: Ubuntu 24.04 | GCC 14 | control-plane integration
+    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu 24.04 | GCC 14 | Release
+            blocks_sdk_tag: main-ubuntu-24.04-gcc14-release
+            cxx: g++-14
+            cmake_build_type: RelWithDebInfo
+            cxx_flags: -Wno-error=null-dereference
+            linker_flags: ""
+            asan_options: ""
+          - name: Ubuntu 26.04 | GCC | Release
+            blocks_sdk_tag: main-ubuntu-26.04-gcc-release
+            cxx: g++
+            cmake_build_type: RelWithDebInfo
+            cxx_flags: ""
+            linker_flags: ""
+            asan_options: ""
+          - name: Ubuntu 26.04 | GCC | Debug
+            blocks_sdk_tag: main-ubuntu-26.04-gcc-debug
+            cxx: g++
+            cmake_build_type: Debug
+            cxx_flags: ""
+            linker_flags: ""
+            asan_options: ""
+          - name: Ubuntu 24.04 | Clang 20 | Release
+            blocks_sdk_tag: main-ubuntu-24.04-clang20-release
+            cxx: clang++-20
+            cmake_build_type: RelWithDebInfo
+            cxx_flags: -fsanitize=address -Wno-error=deprecated-declarations
+            linker_flags: -fsanitize=address
+            asan_options: detect_leaks=0
+          - name: Fedora 44 | Clang | Release
+            blocks_sdk_tag: main-fedora-44-clang-release
+            cxx: clang++
+            cmake_build_type: RelWithDebInfo
+            cxx_flags: -fsanitize=address -Wno-error=deprecated-declarations
+            linker_flags: -fsanitize=address
+            asan_options: detect_leaks=0
+          - name: Fedora 44 | Clang | Debug
+            blocks_sdk_tag: main-fedora-44-clang-debug
+            cxx: clang++
+            cmake_build_type: Debug
+            cxx_flags: -fsanitize=address -Wno-error=deprecated-declarations
+            linker_flags: -fsanitize=address
+            asan_options: detect_leaks=0
     container:
-      image: ghcr.io/gnuradio/ci:ubuntu-24.04-4.0
+      image: ghcr.io/${{ github.repository_owner }}/gnuradio4-blocks-sdk:${{ matrix.blocks_sdk_tag }}
 
     env:
-      CC: gcc-14
-      CXX: g++-14
+      CXX: ${{ matrix.cxx }}
 
     steps:
-      - name: Check out the integration harness
-        uses: actions/checkout@v6
-        with:
-          repository: mormj/gr4-super
-          ref: ${{ env.GR4_CI_SUPER_REF }}
-          path: integration
-
       - name: Check out control-plane
         uses: actions/checkout@v6
         with:
-          path: integration/src/gnuradio4-control-plane
+          fetch-depth: 0
 
       - name: Configure
-        working-directory: integration
         shell: bash
         env:
           CMAKE_OPTIONS: ${{ inputs.cmake_options }}
-          USE_LATEST_REVISIONS: ${{ github.event_name == 'schedule' }}
         run: |
           cmake_args=(
-            --preset ci
-            -DGR4_MODULES=gnuradio4-control-plane
+            -S .
+            -B ../build
+            -DCMAKE_COLOR_DIAGNOSTICS=ON
+            -DCMAKE_PREFIX_PATH=/opt/gnuradio4
+            -DGR4CP_GNURADIO4_PREFIX=/opt/gnuradio4
+            -DCMAKE_BUILD_TYPE=${{ matrix.cmake_build_type }}
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+            -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
           )
-          if [[ "${USE_LATEST_REVISIONS}" != "true" ]]; then
+          if [[ -n "${{ matrix.cxx_flags }}" ]]; then
+            cmake_args+=("-DCMAKE_CXX_FLAGS=${{ matrix.cxx_flags }}")
+          fi
+          if [[ -n "${{ matrix.linker_flags }}" ]]; then
             cmake_args+=(
-              "-DGR4_CORE_REF=${GR4_CI_CORE_REF}"
-              "-DGR4_LIBRARY_REF=${GR4_CI_LIBRARY_REF}"
-              "-DGR4_BLOCKS_REF=${GR4_CI_BLOCKS_REF}"
+              "-DCMAKE_EXE_LINKER_FLAGS=${{ matrix.linker_flags }}"
+              "-DCMAKE_SHARED_LINKER_FLAGS=${{ matrix.linker_flags }}"
             )
           fi
           if [[ -n "${CMAKE_OPTIONS}" ]]; then
@@ -78,6 +118,10 @@ jobs:
           fi
           cmake "${cmake_args[@]}"
 
-      - name: Build and test control-plane with its dependencies
-        working-directory: integration
-        run: cmake --build --preset ci --target check
+      - name: Build
+        run: cmake --build ../build --parallel 4
+
+      - name: Execute tests
+        env:
+          ASAN_OPTIONS: ${{ matrix.asan_options }}
+        run: ctest --test-dir ../build --output-on-failure
