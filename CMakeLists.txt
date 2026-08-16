@@ -9,6 +9,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 include(GNUInstallDirs)
 
 option(USE_CCACHE "Use ccache if available" ON)
+option(ENABLE_TESTING "Build control-plane tests" ON)
 
 option(GR4CP_ENABLE_GR4_CATALOG "Enable the required GNU Radio 4-backed block catalog provider" ON)
 option(GR4CP_SUPPRESS_IMPORTED_WERROR "Remove -Werror inherited from imported dependency targets" OFF)
@@ -39,7 +40,6 @@ if((CMAKE_GENERATOR STREQUAL "Ninja" OR (CCACHE_PROGRAM AND USE_CCACHE)) AND NOT
 endif()
 
 find_package(nlohmann_json CONFIG REQUIRED)
-find_package(GTest CONFIG REQUIRED)
 find_package(Threads REQUIRED)
 set(Boost_NO_BOOST_CMAKE ON)
 find_package(Boost REQUIRED)
@@ -258,6 +258,8 @@ target_link_libraries(gr4cp_cli_exec
         gr4cp_cli
 )
 
+if(ENABLE_TESTING)
+find_package(GTest CONFIG REQUIRED)
 enable_testing()
 
 add_executable(gr4cp_smoke_test
@@ -338,6 +340,7 @@ if(GR4CP_HAVE_GNURADIO4)
     gtest_discover_tests(gr4cp_cli_test PROPERTIES ENVIRONMENT "${_gr4cp_test_env}")
 else()
     gtest_discover_tests(gr4cp_cli_test)
+endif()
 endif()
 
 install(TARGETS gr4cp_core gr4cp_cli gr4cp_server gr4cp_cli_exec
