@@ -39,51 +39,72 @@ if((CMAKE_GENERATOR STREQUAL "Ninja" OR (CCACHE_PROGRAM AND USE_CCACHE)) AND NOT
     set(CMAKE_COLOR_DIAGNOSTICS ON)
 endif()
 
-find_package(nlohmann_json CONFIG REQUIRED)
-find_package(Threads REQUIRED)
-set(Boost_NO_BOOST_CMAKE ON)
-find_package(Boost REQUIRED)
-if(TARGET Boost::headers)
-    set(GR4CP_BOOST_HEADERS_TARGET Boost::headers)
-elseif(TARGET Boost::boost)
-    set(GR4CP_BOOST_HEADERS_TARGET Boost::boost)
+if(EMSCRIPTEN)
+    message(STATUS "Fetch nlohmann/json...")
+    include(FetchContent)
+    set(JSON_BuildTests OFF CACHE INTERNAL "")
+    set(JSON_Install OFF CACHE INTERNAL "")
+    FetchContent_Declare(nlohmann_json
+        GIT_REPOSITORY https://github.com/nlohmann/json.git
+        GIT_TAG v3.12.0
+        GIT_SHALLOW TRUE
+        SYSTEM
+    )
+    FetchContent_MakeAvailable(nlohmann_json)
+    message(STATUS "nlohmann/json fetched.")
 else()
-    message(FATAL_ERROR "Boost headers target was not provided by find_package(Boost)")
+    find_package(nlohmann_json CONFIG REQUIRED)
+endif()
+find_package(Threads REQUIRED)
+
+if(NOT EMSCRIPTEN)
+    set(Boost_NO_BOOST_CMAKE ON)
+    find_package(Boost REQUIRED)
+    if(TARGET Boost::headers)
+        set(GR4CP_BOOST_HEADERS_TARGET Boost::headers)
+    elseif(TARGET Boost::boost)
+        set(GR4CP_BOOST_HEADERS_TARGET Boost::boost)
+    else()
+        message(FATAL_ERROR "Boost headers target was not provided by find_package(Boost)")
+    endif()
 endif()
 find_package(ZLIB REQUIRED)
 find_package(PkgConfig REQUIRED)
-find_package(httplib CONFIG QUIET)
-set(GR4CP_HTTPLIB_EXTRA_TARGETS "")
-if(httplib_FOUND)
-    set(GR4CP_HTTPLIB_TARGET httplib::httplib)
-else()
-    pkg_check_modules(CPPHTTPLIB QUIET IMPORTED_TARGET cpp-httplib)
-    if(TARGET PkgConfig::CPPHTTPLIB)
-        set(GR4CP_HTTPLIB_TARGET PkgConfig::CPPHTTPLIB)
-        pkg_check_modules(CPPHTTPLIB_OPENSSL REQUIRED IMPORTED_TARGET openssl)
-        pkg_check_modules(CPPHTTPLIB_BROTLICOMMON REQUIRED IMPORTED_TARGET libbrotlicommon)
-        pkg_check_modules(CPPHTTPLIB_BROTLIDEC REQUIRED IMPORTED_TARGET libbrotlidec)
-        pkg_check_modules(CPPHTTPLIB_BROTLIENC REQUIRED IMPORTED_TARGET libbrotlienc)
-        list(APPEND GR4CP_HTTPLIB_EXTRA_TARGETS
-            PkgConfig::CPPHTTPLIB_OPENSSL
-            PkgConfig::CPPHTTPLIB_BROTLICOMMON
-            PkgConfig::CPPHTTPLIB_BROTLIDEC
-            PkgConfig::CPPHTTPLIB_BROTLIENC
-        )
+
+if(NOT EMSCRIPTEN)
+    find_package(httplib CONFIG QUIET)
+    set(GR4CP_HTTPLIB_EXTRA_TARGETS "")
+    if(httplib_FOUND)
+        set(GR4CP_HTTPLIB_TARGET httplib::httplib)
     else()
-        find_path(GR4CP_CPPHTTPLIB_INCLUDE_DIR
-            NAMES httplib.h
-            PATH_SUFFIXES include
-        )
+        pkg_check_modules(CPPHTTPLIB QUIET IMPORTED_TARGET cpp-httplib)
+        if(TARGET PkgConfig::CPPHTTPLIB)
+            set(GR4CP_HTTPLIB_TARGET PkgConfig::CPPHTTPLIB)
+            pkg_check_modules(CPPHTTPLIB_OPENSSL REQUIRED IMPORTED_TARGET openssl)
+            pkg_check_modules(CPPHTTPLIB_BROTLICOMMON REQUIRED IMPORTED_TARGET libbrotlicommon)
+            pkg_check_modules(CPPHTTPLIB_BROTLIDEC REQUIRED IMPORTED_TARGET libbrotlidec)
+            pkg_check_modules(CPPHTTPLIB_BROTLIENC REQUIRED IMPORTED_TARGET libbrotlienc)
+            list(APPEND GR4CP_HTTPLIB_EXTRA_TARGETS
+                PkgConfig::CPPHTTPLIB_OPENSSL
+                PkgConfig::CPPHTTPLIB_BROTLICOMMON
+                PkgConfig::CPPHTTPLIB_BROTLIDEC
+                PkgConfig::CPPHTTPLIB_BROTLIENC
+            )
+        else()
+            find_path(GR4CP_CPPHTTPLIB_INCLUDE_DIR
+                NAMES httplib.h
+                PATH_SUFFIXES include
+            )
 
-        if(NOT GR4CP_CPPHTTPLIB_INCLUDE_DIR)
-            message(FATAL_ERROR "Could not find cpp-httplib. Install it with a CMake package config, a pkg-config module, or ensure httplib.h is visible to CMake.")
+            if(NOT GR4CP_CPPHTTPLIB_INCLUDE_DIR)
+                message(FATAL_ERROR "Could not find cpp-httplib. Install it with a CMake package config, a pkg-config module, or ensure httplib.h is visible to CMake.")
+            endif()
+
+            add_library(gr4cp_cpp_httplib INTERFACE)
+            add_library(gr4cp::cpp_httplib ALIAS gr4cp_cpp_httplib)
+            target_include_directories(gr4cp_cpp_httplib INTERFACE "${GR4CP_CPPHTTPLIB_INCLUDE_DIR}")
+            set(GR4CP_HTTPLIB_TARGET gr4cp::cpp_httplib)
         endif()
-
-        add_library(gr4cp_cpp_httplib INTERFACE)
-        add_library(gr4cp::cpp_httplib ALIAS gr4cp_cpp_httplib)
-        target_include_directories(gr4cp_cpp_httplib INTERFACE "${GR4CP_CPPHTTPLIB_INCLUDE_DIR}")
-        set(GR4CP_HTTPLIB_TARGET gr4cp::cpp_httplib)
     endif()
 endif()
 
@@ -135,7 +156,6 @@ add_library(gr4cp_core
     src/app/block_catalog_service.cpp
     src/app/scheduler_catalog_service.cpp
     src/app/session_stream_service.cpp
-    src/api/http_server.cpp
     src/catalog/static_block_catalog_provider.cpp
     src/domain/block_catalog.cpp
     src/domain/scheduler_catalog.cpp
@@ -147,6 +167,14 @@ add_library(gr4cp_core
     src/runtime/stub_runtime_manager.cpp
     src/storage/in_memory_session_repository.cpp
 )
+
+if(NOT EMSCRIPTEN)
+    # cpp-httplib and Boost.Beast both need real sockets, so the HTTP transport is native-only.
+    target_sources(gr4cp_core PRIVATE src/api/http_server.cpp)
+else()
+    # WASM talks to gnuradio4-studio in-process through this dispatcher instead.
+    target_sources(gr4cp_core PRIVATE src/api/wasm_api.cpp)
+endif()
 
 if(GR4CP_HAVE_GNURADIO4)
     target_sources(gr4cp_core
@@ -180,14 +208,23 @@ target_include_directories(gr4cp_core
         include
 )
 
-target_link_libraries(gr4cp_core
-    PUBLIC
-        ${GR4CP_BOOST_HEADERS_TARGET}
-        ${GR4CP_HTTPLIB_TARGET}
-        ${GR4CP_HTTPLIB_EXTRA_TARGETS}
-        ZLIB::ZLIB
-        nlohmann_json::nlohmann_json
-)
+if(NOT EMSCRIPTEN)
+    target_link_libraries(gr4cp_core
+        PUBLIC
+            ${GR4CP_BOOST_HEADERS_TARGET}
+            ${GR4CP_HTTPLIB_TARGET}
+            ${GR4CP_HTTPLIB_EXTRA_TARGETS}
+            ZLIB::ZLIB
+            nlohmann_json::nlohmann_json
+    )
+else()
+    target_link_libraries(gr4cp_core
+        PUBLIC
+            ${GR4CP_BOOST_HEADERS_TARGET}
+            ZLIB::ZLIB
+            nlohmann_json::nlohmann_json
+    )
+endif()
 
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     target_link_libraries(gr4cp_core
@@ -196,158 +233,222 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     )
 endif()
 
-add_library(gr4cp_cli
-    src/cli/cli.cpp
-)
+if(NOT EMSCRIPTEN)
+    add_library(gr4cp_cli
+        src/cli/cli.cpp
+    )
 
-target_include_directories(gr4cp_cli
-    PUBLIC
-        include
-)
+    target_include_directories(gr4cp_cli
+        PUBLIC
+            include
+    )
 
-target_link_libraries(gr4cp_cli
-    PUBLIC
-        ${GR4CP_BOOST_HEADERS_TARGET}
-        ${GR4CP_HTTPLIB_TARGET}
-        ${GR4CP_HTTPLIB_EXTRA_TARGETS}
-        ZLIB::ZLIB
-        nlohmann_json::nlohmann_json
-)
-
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     target_link_libraries(gr4cp_cli
         PUBLIC
-            stdc++exp
+            ${GR4CP_BOOST_HEADERS_TARGET}
+            ${GR4CP_HTTPLIB_TARGET}
+            ${GR4CP_HTTPLIB_EXTRA_TARGETS}
+            ZLIB::ZLIB
+            nlohmann_json::nlohmann_json
     )
+
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_link_libraries(gr4cp_cli
+            PUBLIC
+                stdc++exp
+        )
+    endif()
 endif()
 
-add_executable(gr4cp_server
-    src/main.cpp
-)
+if(NOT EMSCRIPTEN)
+    add_executable(gr4cp_server
+        src/main.cpp
+    )
 
-target_link_libraries(gr4cp_server
-    PRIVATE
-        gr4cp_core
-)
+    target_link_libraries(gr4cp_server
+        PRIVATE
+            gr4cp_core
+    )
+else()
+    # gnuradio4-studio loads this module and calls Module.handleRequest() directly; there is no
+    # listening socket, so src/main.cpp (which drives HttpServer) has no WASM counterpart.
+    add_executable(gr4cp_wasm
+        src/wasm_main.cpp
+    )
+    set(GR4CP_WASM_BLOCK_LIBRARIES "GrFourierBlocks;GrHttpBlocks;Gr4StudioBlocks;GrBasicBlocks" CACHE STRING
+        "gnuradio4 block libraries statically linked into the WASM module")
 
-add_executable(gr4cp_cli_exec
-    src/cli_main.cpp
-)
+    set(GR4CP_WASM_BLOCK_INCLUDES "")
+    set(GR4CP_WASM_BLOCK_CALLS "")
+    foreach(_gr4cp_block_library IN LISTS GR4CP_WASM_BLOCK_LIBRARIES)
+        set(_gr4cp_block_archive
+            "${GR4CP_GNURADIO4_LIB_DIR}/gnuradio-4/plugins/${CMAKE_STATIC_LIBRARY_PREFIX}${_gr4cp_block_library}Static${CMAKE_STATIC_LIBRARY_SUFFIX}")
+        if(NOT EXISTS "${_gr4cp_block_archive}")
+            message(FATAL_ERROR
+                "GR4CP_WASM_BLOCK_LIBRARIES names ${_gr4cp_block_library}, but ${_gr4cp_block_archive} "
+                "does not exist. Build that block library with MAKE_STATIC_LIBRARY and install it.")
+        endif()
+        target_link_libraries(gr4cp_wasm PRIVATE "${_gr4cp_block_archive}")
+        string(APPEND GR4CP_WASM_BLOCK_INCLUDES
+            "#include <gnuradio-4.0/${_gr4cp_block_library}.hpp>\n")
+        string(APPEND GR4CP_WASM_BLOCK_CALLS
+            "    (void)gr::blocklib::init${_gr4cp_block_library}(gr::globalBlockRegistry());\n")
+    endforeach()
 
-set_target_properties(gr4cp_cli_exec PROPERTIES OUTPUT_NAME gr4cp-cli)
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/wasm_block_registration.hpp.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/gr4cp/wasm_block_registration.hpp"
+        @ONLY
+    )
+    target_include_directories(gr4cp_wasm PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 
-if(APPLE)
-    set(_gr4cp_executable_install_rpath "@loader_path/../${CMAKE_INSTALL_LIBDIR}")
-    set(_gr4cp_library_install_rpath "@loader_path")
-elseif(UNIX)
-    set(_gr4cp_executable_install_rpath "\$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
-    set(_gr4cp_library_install_rpath "\$ORIGIN")
+    target_link_libraries(gr4cp_wasm
+        PRIVATE
+            gr4cp_core
+            embind
+    )
+
+    target_link_options(gr4cp_wasm
+        PRIVATE
+            "-sMODULARIZE=1"
+            "-sEXPORT_ES6=1"
+            "-sEXPORT_NAME=createGr4cpModule"
+    )
+
+    set_target_properties(gr4cp_wasm PROPERTIES SUFFIX ".mjs")
 endif()
 
-if(DEFINED _gr4cp_executable_install_rpath)
-    set_target_properties(gr4cp_server gr4cp_cli_exec PROPERTIES
-        INSTALL_RPATH "${_gr4cp_executable_install_rpath}"
+if(NOT EMSCRIPTEN)
+    add_executable(gr4cp_cli_exec
+        src/cli_main.cpp
     )
-    set_target_properties(gr4cp_core gr4cp_cli PROPERTIES
-        INSTALL_RPATH "${_gr4cp_library_install_rpath}"
+
+    set_target_properties(gr4cp_cli_exec PROPERTIES OUTPUT_NAME gr4cp-cli)
+
+    if(APPLE)
+        set(_gr4cp_executable_install_rpath "@loader_path/../${CMAKE_INSTALL_LIBDIR}")
+        set(_gr4cp_library_install_rpath "@loader_path")
+    elseif(UNIX)
+        set(_gr4cp_executable_install_rpath "\$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
+        set(_gr4cp_library_install_rpath "\$ORIGIN")
+    endif()
+
+    if(DEFINED _gr4cp_executable_install_rpath)
+        set_target_properties(gr4cp_server gr4cp_cli_exec PROPERTIES
+            INSTALL_RPATH "${_gr4cp_executable_install_rpath}"
+        )
+        set_target_properties(gr4cp_core gr4cp_cli PROPERTIES
+            INSTALL_RPATH "${_gr4cp_library_install_rpath}"
+        )
+    endif()
+
+    target_link_libraries(gr4cp_cli_exec
+        PRIVATE
+            gr4cp_cli
     )
 endif()
-
-target_link_libraries(gr4cp_cli_exec
-    PRIVATE
-        gr4cp_cli
-)
 
 if(ENABLE_TESTING)
-find_package(GTest CONFIG REQUIRED)
+if(NOT EMSCRIPTEN)
+    find_package(GTest CONFIG REQUIRED)
+endif()
+
 enable_testing()
 
-add_executable(gr4cp_smoke_test
-    test/healthz_smoke_test.cpp
-)
+if(NOT EMSCRIPTEN)
+    add_executable(gr4cp_smoke_test
+        test/healthz_smoke_test.cpp
+    )
 
-target_link_libraries(gr4cp_smoke_test
-    PRIVATE
-        gr4cp_core
-        GTest::gtest_main
-        Threads::Threads
-)
+    target_link_libraries(gr4cp_smoke_test
+        PRIVATE
+            gr4cp_core
+            GTest::gtest_main
+            Threads::Threads
+    )
 
-include(GoogleTest)
-if(GR4CP_HAVE_GNURADIO4)
-    gtest_discover_tests(gr4cp_smoke_test PROPERTIES ENVIRONMENT "${_gr4cp_test_env}")
-else()
-    gtest_discover_tests(gr4cp_smoke_test)
-endif()
+    include(GoogleTest)
+    if(GR4CP_HAVE_GNURADIO4)
+        gtest_discover_tests(gr4cp_smoke_test PROPERTIES ENVIRONMENT "${_gr4cp_test_env}")
+    else()
+        gtest_discover_tests(gr4cp_smoke_test)
+    endif()
 
-add_executable(gr4cp_core_test
-    test/block_settings_service_test.cpp
-    test/session_service_test.cpp
-    test/session_stream_service_test.cpp
-    test/block_catalog_service_test.cpp
-    test/gr4_block_catalog_provider_test.cpp
-    test/gr4_runtime_manager_test.cpp
-)
 
-target_link_libraries(gr4cp_core_test
-    PRIVATE
-        gr4cp_core
-        GTest::gtest_main
-        Threads::Threads
-)
+    add_executable(gr4cp_core_test
+        test/block_settings_service_test.cpp
+        test/session_service_test.cpp
+        test/session_stream_service_test.cpp
+        test/block_catalog_service_test.cpp
+        test/gr4_block_catalog_provider_test.cpp
+        test/gr4_runtime_manager_test.cpp
+    )
 
-if(GR4CP_HAVE_GNURADIO4)
-    gtest_discover_tests(gr4cp_core_test PROPERTIES ENVIRONMENT "${_gr4cp_test_env}")
-else()
-    gtest_discover_tests(gr4cp_core_test)
-endif()
+    target_link_libraries(gr4cp_core_test
+        PRIVATE
+            gr4cp_core
+            GTest::gtest_main
+            Threads::Threads
+    )
 
-add_executable(gr4cp_http_test
-    test/http_api_test.cpp
-)
+    if(GR4CP_HAVE_GNURADIO4)
+        gtest_discover_tests(gr4cp_core_test PROPERTIES ENVIRONMENT "${_gr4cp_test_env}")
+    else()
+        gtest_discover_tests(gr4cp_core_test)
+    endif()
 
-target_link_libraries(gr4cp_http_test
-    PRIVATE
-        gr4cp_core
-        GTest::gtest_main
-        Threads::Threads
-)
+    add_executable(gr4cp_http_test
+        test/http_api_test.cpp
+    )
 
-if(GR4CP_HAVE_GNURADIO4)
-    gtest_discover_tests(gr4cp_http_test PROPERTIES ENVIRONMENT "${_gr4cp_test_env}")
-else()
-    gtest_discover_tests(gr4cp_http_test)
-endif()
 
-add_executable(gr4cp_cli_test
-    test/cli_test.cpp
-)
+    target_link_libraries(gr4cp_http_test
+        PRIVATE
+            gr4cp_core
+            GTest::gtest_main
+            Threads::Threads
+    )
 
-target_link_libraries(gr4cp_cli_test
-    PRIVATE
-        gr4cp_cli
-        gr4cp_core
-        GTest::gtest_main
-        Threads::Threads
-)
+    if(GR4CP_HAVE_GNURADIO4)
+        gtest_discover_tests(gr4cp_http_test PROPERTIES ENVIRONMENT "${_gr4cp_test_env}")
+    else()
+        gtest_discover_tests(gr4cp_http_test)
+    endif()
 
-target_compile_definitions(gr4cp_cli_test
-    PRIVATE
-        GR4CP_CLI_EXECUTABLE="$<TARGET_FILE:gr4cp_cli_exec>"
-)
+    add_executable(gr4cp_cli_test
+        test/cli_test.cpp
+    )
 
-if(GR4CP_HAVE_GNURADIO4)
-    gtest_discover_tests(gr4cp_cli_test PROPERTIES ENVIRONMENT "${_gr4cp_test_env}")
-else()
-    gtest_discover_tests(gr4cp_cli_test)
-endif()
-endif()
+    target_link_libraries(gr4cp_cli_test
+        PRIVATE
+            gr4cp_cli
+            gr4cp_core
+            GTest::gtest_main
+            Threads::Threads
+    )
+
+    target_compile_definitions(gr4cp_cli_test
+        PRIVATE
+            GR4CP_CLI_EXECUTABLE="$<TARGET_FILE:gr4cp_cli_exec>"
+    )
+
+    if(GR4CP_HAVE_GNURADIO4)
+        gtest_discover_tests(gr4cp_cli_test PROPERTIES ENVIRONMENT "${_gr4cp_test_env}")
+    else()
+        gtest_discover_tests(gr4cp_cli_test)
+    endif()
+
+    install(TARGETS gr4cp_server gr4cp_cli_exec
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
 
 install(TARGETS gr4cp_core gr4cp_cli gr4cp_server gr4cp_cli_exec
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+endif()
+endif()
 
 install(DIRECTORY include/gr4cp/
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/gr4cp

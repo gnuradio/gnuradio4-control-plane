@@ -50,6 +50,18 @@ std::vector<std::filesystem::path> default_plugin_directories() {
 #endif
 }
 
+bool is_alias_scheduler_id(const std::string& id) {
+    return id.find('<') == std::string::npos;
+}
+
+void register_default_schedulers() {
+    auto& registry = gr::globalSchedulerRegistry();
+    (void)registry.insert<gr::scheduler::Simple<gr::scheduler::ExecutionPolicy::singleThreaded>>("=gr::scheduler::SimpleSingle");
+    (void)registry.insert<gr::scheduler::Simple<gr::scheduler::ExecutionPolicy::multiThreaded>>("=gr::scheduler::SimpleMulti");
+}
+
+#if !defined(__EMSCRIPTEN__)
+
 bool is_shared_library(const std::filesystem::path& path) {
 #if defined(__APPLE__)
     constexpr auto extension = ".dylib";
@@ -159,10 +171,6 @@ std::filesystem::path create_stage_directory() {
     return base;
 }
 
-bool is_alias_scheduler_id(const std::string& id) {
-    return id.find('<') == std::string::npos;
-}
-
 std::filesystem::path stage_library(const std::filesystem::path& source, const std::filesystem::path& destination) {
     std::error_code error;
     std::filesystem::create_symlink(source, destination, error);
@@ -209,11 +217,17 @@ CandidateLibraries collect_candidate_libraries(const std::vector<std::filesystem
     return candidates;
 }
 
-void register_default_schedulers() {
-    auto& registry = gr::globalSchedulerRegistry();
-    (void)registry.insert<gr::scheduler::Simple<gr::scheduler::ExecutionPolicy::singleThreaded>>("=gr::scheduler::SimpleSingle");
-    (void)registry.insert<gr::scheduler::Simple<gr::scheduler::ExecutionPolicy::multiThreaded>>("=gr::scheduler::SimpleMulti");
+template <typename Loader>
+void throw_on_failed_plugins(const Loader& loader) {
+    if constexpr (requires { loader.failedPlugins(); }) {
+        if (!loader.failedPlugins().empty()) {
+            const auto& [path, error] = *loader.failedPlugins().begin();
+            throw SchedulerCatalogLoadError("failed to load GNU Radio 4 plugin library (" + path + ": " + error + ")");
+        }
+    }
 }
+
+#endif  // !defined(__EMSCRIPTEN__)
 
 }  // namespace
 
@@ -221,6 +235,10 @@ Gr4SchedulerCatalogProvider::Gr4SchedulerCatalogProvider(std::vector<std::filesy
     : plugin_directories_(plugin_directories.empty() ? default_plugin_directories() : std::move(plugin_directories)) {}
 
 std::vector<domain::SchedulerDescriptor> Gr4SchedulerCatalogProvider::list() const {
+#if defined(__EMSCRIPTEN__)
+    register_default_schedulers();
+    auto scheduler_ids = gr::globalSchedulerRegistry().keys();
+#else
     if (plugin_directories_.empty()) {
         throw SchedulerCatalogLoadError("GNU Radio 4 plugin directories are not configured");
     }
@@ -236,12 +254,10 @@ std::vector<domain::SchedulerDescriptor> Gr4SchedulerCatalogProvider::list() con
     }
 
     gr::PluginLoader loader(gr::globalBlockRegistry(), gr::globalSchedulerRegistry(), plugin_loader_directories);
-    if (!loader.failedPlugins().empty()) {
-        const auto& [path, error] = *loader.failedPlugins().begin();
-        throw SchedulerCatalogLoadError("failed to load GNU Radio 4 plugin library (" + path + ": " + error + ")");
-    }
+    throw_on_failed_plugins(loader);
 
     auto scheduler_ids = loader.availableSchedulers();
+#endif
     std::sort(scheduler_ids.begin(), scheduler_ids.end());
     scheduler_ids.erase(std::unique(scheduler_ids.begin(), scheduler_ids.end()), scheduler_ids.end());
     scheduler_ids.erase(std::remove_if(scheduler_ids.begin(), scheduler_ids.end(),

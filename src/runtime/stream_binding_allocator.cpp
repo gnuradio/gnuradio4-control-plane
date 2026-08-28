@@ -3,6 +3,9 @@
 #include <format>
 #include <stdexcept>
 
+#if defined(__EMSCRIPTEN__)
+#include <atomic>
+#else
 #if defined(_WIN32)
 #include <winsock2.h>
 #else
@@ -11,10 +14,25 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
+#endif
 
 namespace gr4cp::runtime {
 
 namespace {
+
+#if defined(__EMSCRIPTEN__)
+
+int reserve_ephemeral_loopback_port() {
+    static std::atomic<int> next_port{49152};
+
+    const int port = next_port.fetch_add(1);
+    if (port > 65535) {
+        throw std::runtime_error("exhausted synthetic stream ports for the WASM build");
+    }
+    return port;
+}
+
+#else
 
 class SocketHandle {
 public:
@@ -70,6 +88,8 @@ int reserve_ephemeral_loopback_port() {
 
     return ntohs(bound.sin_port);
 }
+
+#endif  // defined(__EMSCRIPTEN__)
 
 }  // namespace
 

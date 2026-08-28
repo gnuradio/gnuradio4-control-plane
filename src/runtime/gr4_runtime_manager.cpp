@@ -31,7 +31,9 @@
 #include <gnuradio-4.0/PluginLoader.hpp>
 #include <gnuradio-4.0/Scheduler.hpp>
 #include <gnuradio-4.0/YamlPmt.hpp>
+#ifndef __EMSCRIPTEN__
 #include <httplib.h>
+#endif
 
 namespace gr4cp::runtime {
 
@@ -800,6 +802,10 @@ std::optional<domain::StreamRuntimePlan> Gr4RuntimeManager::active_stream_plan(c
 }
 
 HttpStreamResponse Gr4RuntimeManager::fetch_http_stream(const domain::Session& session, const std::string& stream_id) {
+#ifdef __EMSCRIPTEN__
+    (void)stream_id;
+    throw runtime_error(session, "stream fetch", "HTTP stream fetch is not available in WASM builds");
+#else
     domain::InternalStreamBinding internal;
     {
         auto resources = find_resources(session.id);
@@ -852,6 +858,7 @@ HttpStreamResponse Gr4RuntimeManager::fetch_http_stream(const domain::Session& s
         .body = response->body,
         .content_type = content_type,
     };
+#endif
 }
 
 WebSocketStreamRoute Gr4RuntimeManager::resolve_websocket_stream(const domain::Session& session, const std::string& stream_id) {
