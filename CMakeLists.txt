@@ -438,16 +438,15 @@ if(NOT EMSCRIPTEN)
         gtest_discover_tests(gr4cp_cli_test)
     endif()
 
-    install(TARGETS gr4cp_server gr4cp_cli_exec
-        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-    )
-
-install(TARGETS gr4cp_core gr4cp_cli gr4cp_server gr4cp_cli_exec
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-)
 endif()
+endif()
+
+if(NOT EMSCRIPTEN)
+    install(TARGETS gr4cp_core gr4cp_cli gr4cp_server gr4cp_cli_exec
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    )
 endif()
 
 install(DIRECTORY include/gr4cp/
