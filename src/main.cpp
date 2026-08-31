@@ -9,16 +9,30 @@
 #include "gr4cp/runtime/gr4_runtime_manager.hpp"
 #include "gr4cp/storage/in_memory_session_repository.hpp"
 
+#include <cstdio>
 #include <cstdlib>
 #include <exception>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 #include <httplib.h>
 
 namespace {
+
+void configure_managed_stdio() {
+    const char* stream_stdio = std::getenv("GR4CP_STREAM_STDIO");
+    if (stream_stdio == nullptr || std::string_view(stream_stdio) != "1") {
+        return;
+    }
+
+    (void)std::setvbuf(stdout, nullptr, _IOLBF, 0);
+    (void)std::setvbuf(stderr, nullptr, _IONBF, 0);
+    std::cout << std::unitbuf;
+    std::cerr << std::unitbuf;
+}
 
 [[noreturn]] void report_terminate() noexcept {
     std::cerr << "gr4cp_server: fatal: std::terminate called";
@@ -58,6 +72,7 @@ void write_port_file(const char* path, int port) {
 }  // namespace
 
 int main() {
+    configure_managed_stdio();
     std::set_terminate(report_terminate);
 
     try {
