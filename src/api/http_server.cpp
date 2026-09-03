@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cctype>
+#include <condition_variable>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
@@ -624,63 +625,130 @@ std::optional<tcp::endpoint> endpoint_for_host(const std::string& host, const un
     return tcp::endpoint{address, port};
 }
 
-class WebSocketBridge {
+class WebSocketBridge : public std::enable_shared_from_this<WebSocketBridge> {
 public:
     WebSocketBridge(websocket::stream<beast::tcp_stream>&& browser,
                     websocket::stream<beast::tcp_stream>&& internal)
         : browser_(std::move(browser)), internal_(std::move(internal)) {}
 
     void run() {
-        std::jthread browser_to_internal([this]() { forward(browser_, internal_); });
-        std::jthread internal_to_browser([this]() { forward(internal_, browser_); });
-        browser_to_internal.join();
-        internal_to_browser.join();
-        close();
+        auto self = shared_from_this();
+        asio::post(browser_.get_executor(), [self]() { self->start(); });
+
+        std::unique_lock lock(done_mutex_);
+        done_condition_.wait(lock, [this]() { return done_; });
     }
 
     void close() {
-        std::lock_guard lock(close_mutex_);
-        if (closed_.exchange(true)) {
+        auto self = shared_from_this();
+        asio::post(browser_.get_executor(), [self]() { self->begin_close(); });
+    }
+
+private:
+    void start() {
+        if (closing_) {
+            finish_if_idle();
             return;
         }
+        read_browser();
+        read_internal();
+    }
+
+    void read_browser() {
+        if (closing_) {
+            return;
+        }
+        ++pending_operations_;
+        browser_.async_read(browser_buffer_, [self = shared_from_this()](const beast::error_code& error, std::size_t) {
+            --self->pending_operations_;
+            if (error) {
+                self->begin_close();
+                self->finish_if_idle();
+                return;
+            }
+
+            self->internal_.text(self->browser_.got_text());
+            ++self->pending_operations_;
+            self->internal_.async_write(
+                self->browser_buffer_.data(),
+                [self](const beast::error_code& write_error, std::size_t) {
+                    --self->pending_operations_;
+                    if (write_error) {
+                        self->begin_close();
+                        self->finish_if_idle();
+                        return;
+                    }
+                    self->browser_buffer_.consume(self->browser_buffer_.size());
+                    self->read_browser();
+                });
+        });
+    }
+
+    void read_internal() {
+        if (closing_) {
+            return;
+        }
+        ++pending_operations_;
+        internal_.async_read(internal_buffer_, [self = shared_from_this()](const beast::error_code& error, std::size_t) {
+            --self->pending_operations_;
+            if (error) {
+                self->begin_close();
+                self->finish_if_idle();
+                return;
+            }
+
+            self->browser_.text(self->internal_.got_text());
+            ++self->pending_operations_;
+            self->browser_.async_write(
+                self->internal_buffer_.data(),
+                [self](const beast::error_code& write_error, std::size_t) {
+                    --self->pending_operations_;
+                    if (write_error) {
+                        self->begin_close();
+                        self->finish_if_idle();
+                        return;
+                    }
+                    self->internal_buffer_.consume(self->internal_buffer_.size());
+                    self->read_internal();
+                });
+        });
+    }
+
+    void begin_close() {
+        if (closing_) {
+            finish_if_idle();
+            return;
+        }
+        closing_ = true;
 
         beast::error_code error;
         browser_.next_layer().socket().shutdown(tcp::socket::shutdown_both, error);
         browser_.next_layer().socket().close(error);
         internal_.next_layer().socket().shutdown(tcp::socket::shutdown_both, error);
         internal_.next_layer().socket().close(error);
+        finish_if_idle();
     }
 
-private:
-    static bool is_expected_close(const beast::error_code& error) {
-        return error == websocket::error::closed || error == asio::error::operation_aborted ||
-               error == beast::http::error::end_of_stream;
-    }
-
-    void forward(websocket::stream<beast::tcp_stream>& source, websocket::stream<beast::tcp_stream>& destination) {
-        try {
-            for (;;) {
-                beast::flat_buffer buffer;
-                source.read(buffer);
-                destination.text(source.got_text());
-                destination.write(buffer.data());
-            }
-        } catch (const beast::system_error& error) {
-            if (!is_expected_close(error.code())) {
-                close();
-                return;
-            }
-        } catch (...) {
-            close();
+    void finish_if_idle() {
+        if (!closing_ || pending_operations_ != 0U || done_) {
             return;
         }
-        close();
+        {
+            std::lock_guard lock(done_mutex_);
+            done_ = true;
+        }
+        done_condition_.notify_all();
     }
 
     websocket::stream<beast::tcp_stream> browser_;
     websocket::stream<beast::tcp_stream> internal_;
-    std::atomic<bool> closed_{false};
-    std::mutex close_mutex_;
+    beast::flat_buffer browser_buffer_;
+    beast::flat_buffer internal_buffer_;
+    std::size_t pending_operations_{};
+    bool closing_{};
+    std::mutex done_mutex_;
+    std::condition_variable done_condition_;
+    bool done_{};
 };
 
 struct gr4cp::api::HttpServer::Impl {
@@ -769,11 +837,12 @@ struct gr4cp::api::HttpServer::Impl {
     bool listen_after_bind() {
         ensure_internal_bound();
         start_internal_server();
+        start_websocket_io();
         stopping_.store(false);
 
         while (!stopping_.load()) {
             beast::error_code error;
-            tcp::socket socket(io_context_);
+            tcp::socket socket(asio::make_strand(io_context_));
             acceptor_->accept(socket, error);
             if (error) {
                 if (error == asio::error::would_block || error == asio::error::try_again) {
@@ -798,8 +867,7 @@ struct gr4cp::api::HttpServer::Impl {
             });
         }
 
-        join_connection_threads();
-        stop_internal_server();
+        cleanup_threads();
         return true;
     }
 
@@ -825,8 +893,7 @@ struct gr4cp::api::HttpServer::Impl {
             bridge->close();
         }
 
-        join_connection_threads();
-        stop_internal_server();
+        cleanup_threads();
     }
 
     app::SessionService& session_service;
@@ -847,6 +914,12 @@ private:
         }
     }
 
+    void start_websocket_io() {
+        io_context_.restart();
+        websocket_work_guard_.emplace(io_context_.get_executor());
+        websocket_io_thread_ = std::jthread([this]() { io_context_.run(); });
+    }
+
     void wait_for_internal_server_ready() {
         httplib::Client client("127.0.0.1", internal_port_);
         client.set_connection_timeout(0, 200000);
@@ -864,6 +937,20 @@ private:
         if (internal_thread_.joinable()) {
             internal_thread_.join();
         }
+    }
+
+    void stop_websocket_io() {
+        websocket_work_guard_.reset();
+        if (websocket_io_thread_.joinable()) {
+            websocket_io_thread_.join();
+        }
+    }
+
+    void cleanup_threads() {
+        std::lock_guard lock(cleanup_mutex_);
+        join_connection_threads();
+        stop_internal_server();
+        stop_websocket_io();
     }
 
     void join_connection_threads() {
@@ -968,7 +1055,7 @@ private:
             return;
         }
 
-        websocket::stream<beast::tcp_stream> internal(asio::make_strand(io_context_));
+        websocket::stream<beast::tcp_stream> internal(socket.get_executor());
         try {
             tcp::resolver resolver(io_context_);
             const auto endpoint = resolver.resolve(route.internal.host, std::to_string(route.internal.port));
@@ -1007,10 +1094,13 @@ private:
     std::unique_ptr<tcp::acceptor> acceptor_;
     std::atomic<bool> stopping_{true};
     std::jthread internal_thread_;
+    std::optional<asio::executor_work_guard<asio::io_context::executor_type>> websocket_work_guard_;
+    std::jthread websocket_io_thread_;
     std::mutex connection_mutex_;
     std::vector<std::jthread> connection_threads_;
     std::mutex bridge_mutex_;
     std::set<std::shared_ptr<WebSocketBridge>> active_bridges_;
+    std::mutex cleanup_mutex_;
 };
 
 gr4cp::api::HttpServer::HttpServer(app::SessionService& session_service,
