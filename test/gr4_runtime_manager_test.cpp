@@ -242,8 +242,8 @@ TEST_F(Gr4RuntimeManagerTest, RunningSessionSupportsBlockSettingsMessageRoundTri
     const auto settings = runtime_.get_block_settings(session, "src0");
     ASSERT_TRUE(settings.contains("frequency"));
     ASSERT_TRUE(settings.contains("amplitude"));
-    EXPECT_EQ(settings.at("frequency").value_or(0.0), 1250.0);
-    EXPECT_EQ(settings.at("amplitude").value_or(0.0), 0.5);
+    EXPECT_EQ(settings.at("frequency").value_or(0.0F), 1250.0F);
+    EXPECT_EQ(settings.at("amplitude").value_or(0.0F), 0.5F);
 
     runtime_.stop(session);
     runtime_.destroy(session);
@@ -281,8 +281,8 @@ connections:
     const auto settings = runtime_.get_block_settings(session, "gr__basic__SignalGenerator_float32__1");
     ASSERT_TRUE(settings.contains("frequency"));
     ASSERT_TRUE(settings.contains("amplitude"));
-    EXPECT_EQ(settings.at("frequency").value_or(0.0), 1250.0);
-    EXPECT_EQ(settings.at("amplitude").value_or(0.0), 0.5);
+    EXPECT_EQ(settings.at("frequency").value_or(0.0F), 1250.0F);
+    EXPECT_EQ(settings.at("amplitude").value_or(0.0F), 0.5F);
 
     runtime_.stop(session);
     runtime_.destroy(session);
@@ -303,7 +303,7 @@ TEST_F(Gr4RuntimeManagerTest, RunningSessionAlsoResolvesInternalRuntimeIdentifie
 
     const auto settings = runtime_.get_block_settings(session, "gr::blocks::basic::SignalGenerator<float32>#0");
     ASSERT_TRUE(settings.contains("frequency"));
-    EXPECT_EQ(settings.at("frequency").value_or(0.0), 900.0);
+    EXPECT_EQ(settings.at("frequency").value_or(0.0F), 900.0F);
 
     runtime_.stop(session);
     runtime_.destroy(session);
