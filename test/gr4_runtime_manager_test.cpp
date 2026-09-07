@@ -1,17 +1,29 @@
 #include "gr4cp/domain/session.hpp"
 #include "gr4cp/runtime/gr4_runtime_manager.hpp"
 
+#include <gnuradio-4.0/PluginLoader.hpp>
+
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <format>
 #include <string>
+#include <string_view>
 #include <thread>
 
 namespace {
 
 using namespace std::chrono_literals;
+
+constexpr std::string_view kStudioSeriesSinkId = "gr::studio::StudioSeriesSink<float32>";
+constexpr std::string_view kStudioWaterfallSinkId = "gr::studio::StudioWaterfallSink<float32>";
+
+bool block_is_registered(std::string_view block_id) {
+    const auto available = gr::globalPluginLoader().availableBlocks();
+    return std::ranges::any_of(available, [block_id](const auto& name) { return name == block_id; });
+}
 
 gr4cp::domain::Session make_session(std::string id, std::string yaml) {
     gr4cp::domain::Session session;
@@ -343,6 +355,10 @@ TEST_F(Gr4RuntimeManagerTest, MissingBlockSettingsLookupIncludesAvailableRuntime
 }
 
 TEST_F(Gr4RuntimeManagerTest, CompatibilityStudioSeriesSinkHttpStreamCanBeFetchedFromRuntimeBinding) {
+    if (!block_is_registered(kStudioSeriesSinkId)) {
+        GTEST_SKIP() << "block not registered: " << kStudioSeriesSinkId;
+    }
+
     auto session = make_session("runtime_managed_http_series", compatibility_studio_http_series_graph_yaml());
 
     runtime_.prepare(session);
@@ -368,6 +384,10 @@ TEST_F(Gr4RuntimeManagerTest, CompatibilityStudioSeriesSinkHttpStreamCanBeFetche
 }
 
 TEST_F(Gr4RuntimeManagerTest, CompatibilityStudioWaterfallSinkHttpStreamCanBeFetchedFromRuntimeBinding) {
+    if (!block_is_registered(kStudioWaterfallSinkId)) {
+        GTEST_SKIP() << "block not registered: " << kStudioWaterfallSinkId;
+    }
+
     auto session = make_session("runtime_managed_http_waterfall", compatibility_studio_http_waterfall_graph_yaml());
 
     runtime_.prepare(session);
