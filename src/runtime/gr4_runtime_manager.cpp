@@ -568,6 +568,7 @@ bool inject_stream_bindings(gr::property_map& root, const std::vector<domain::Ru
                 continue;
             }
             parameters["endpoint"] = binding.internal.endpoint;
+            parameters["transport"] = binding.plan.transport;
             (*block)["parameters"] = parameters;
             injected_stream_ids.insert(binding.plan.stream_id);
             changed = true;
