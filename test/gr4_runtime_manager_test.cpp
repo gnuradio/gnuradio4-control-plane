@@ -44,7 +44,7 @@ std::string continuous_graph_yaml() {
       sample_rate: 1000.0
       chunk_size: 32
       signal_type: "Sin"
-      frequency: 25.0
+      tone_frequency: 25.0
       amplitude: 1.0
       offset: 0.0
       phase: 0.0
@@ -110,7 +110,7 @@ std::string compatibility_studio_http_series_graph_yaml() {
       sample_rate: 1000.0
       chunk_size: 32
       signal_type: "Sin"
-      frequency: 25.0
+      tone_frequency: 25.0
       amplitude: 1.0
       offset: 0.0
       phase: 0.0
@@ -136,7 +136,7 @@ std::string compatibility_studio_http_waterfall_graph_yaml() {
       sample_rate: 1000.0
       chunk_size: 32
       signal_type: "Sin"
-      frequency: 25.0
+      tone_frequency: 25.0
       amplitude: 1.0
       offset: 0.0
       phase: 0.0
@@ -248,13 +248,13 @@ TEST_F(Gr4RuntimeManagerTest, RunningSessionSupportsBlockSettingsMessageRoundTri
     EXPECT_NO_THROW(runtime_.set_block_settings(
         session,
         "src0",
-        gr::property_map{{"frequency", 1250.0}, {"amplitude", 0.5}},
+        gr::property_map{{"tone_frequency", 1250.0}, {"amplitude", 0.5}},
         gr4cp::runtime::BlockSettingsMode::Staged));
 
     const auto settings = runtime_.get_block_settings(session, "src0");
-    ASSERT_TRUE(settings.contains("frequency"));
+    ASSERT_TRUE(settings.contains("tone_frequency"));
     ASSERT_TRUE(settings.contains("amplitude"));
-    EXPECT_EQ(settings.at("frequency").value_or(0.0F), 1250.0F);
+    EXPECT_EQ(settings.at("tone_frequency").value_or(0.0F), 1250.0F);
     EXPECT_EQ(settings.at("amplitude").value_or(0.0F), 0.5F);
 
     runtime_.stop(session);
@@ -269,7 +269,7 @@ TEST_F(Gr4RuntimeManagerTest, CompatibilityStudioBlockNameResolvesForSettingsRou
       sample_rate: 1000.0
       chunk_size: 32
       signal_type: "Sin"
-      frequency: 25.0
+      tone_frequency: 25.0
       amplitude: 1.0
       offset: 0.0
       phase: 0.0
@@ -287,13 +287,13 @@ connections:
     EXPECT_NO_THROW(runtime_.set_block_settings(
         session,
         "gr__basic__SignalGenerator_float32__1",
-        gr::property_map{{"frequency", 1250.0}, {"amplitude", 0.5}},
+        gr::property_map{{"tone_frequency", 1250.0}, {"amplitude", 0.5}},
         gr4cp::runtime::BlockSettingsMode::Staged));
 
     const auto settings = runtime_.get_block_settings(session, "gr__basic__SignalGenerator_float32__1");
-    ASSERT_TRUE(settings.contains("frequency"));
+    ASSERT_TRUE(settings.contains("tone_frequency"));
     ASSERT_TRUE(settings.contains("amplitude"));
-    EXPECT_EQ(settings.at("frequency").value_or(0.0F), 1250.0F);
+    EXPECT_EQ(settings.at("tone_frequency").value_or(0.0F), 1250.0F);
     EXPECT_EQ(settings.at("amplitude").value_or(0.0F), 0.5F);
 
     runtime_.stop(session);
@@ -321,12 +321,12 @@ TEST_F(Gr4RuntimeManagerTest, RunningSessionAlsoResolvesInternalRuntimeIdentifie
     EXPECT_NO_THROW(runtime_.set_block_settings(
         session,
         runtime_identifier,
-        gr::property_map{{"frequency", 900.0}},
+        gr::property_map{{"tone_frequency", 900.0}},
         gr4cp::runtime::BlockSettingsMode::Staged));
 
     const auto settings = runtime_.get_block_settings(session, runtime_identifier);
-    ASSERT_TRUE(settings.contains("frequency"));
-    EXPECT_EQ(settings.at("frequency").value_or(0.0F), 900.0F);
+    ASSERT_TRUE(settings.contains("tone_frequency"));
+    EXPECT_EQ(settings.at("tone_frequency").value_or(0.0F), 900.0F);
 
     runtime_.stop(session);
     runtime_.destroy(session);

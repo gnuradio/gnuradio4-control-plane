@@ -279,7 +279,7 @@ std::string compatibility_studio_http_poll_graph() {
       sample_rate: 1000.0
       chunk_size: 32
       signal_type: "Sin"
-      frequency: 25.0
+      tone_frequency: 25.0
       amplitude: 1.0
       offset: 0.0
       phase: 0.0
