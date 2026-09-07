@@ -51,7 +51,7 @@ public:
     std::vector<gr4cp::domain::BlockDescriptor> list() const override {
         return {
             {
-                .id = "gr::blocks::math::Add<float32, std::plus<float32>>",
+                .id = "gr::blocks::math::MathOpImpl<float32, std::plus<float32>>",
                 .canonical_type = std::nullopt,
                 .name = "Add<float32>",
                 .category = "Math",
@@ -1086,7 +1086,7 @@ TEST_F(HttpApiTest, GetBlockByIdOmitsUnknownExtendedParameterMetadata) {
 }
 
 TEST_F(HttpApiTest, GetBlockByEncodedIdSuccess) {
-    const auto id = "gr::blocks::math::Add<float32, std::plus<float32>>";
+    const auto id = "gr::blocks::math::MathOpImpl<float32, std::plus<float32>>";
     const auto response = client->Get(("/blocks/" + url_encode(id)).c_str());
 
     ASSERT_TRUE(response);
