@@ -57,6 +57,8 @@ Useful build options:
 
 - `GR4CP_ENABLE_GR4_CATALOG=ON`: require the GNU Radio 4-backed catalog provider, enabled by default
 - `GR4CP_SUPPRESS_IMPORTED_WERROR=ON`: strip inherited `-Werror` from imported GNU Radio 4 targets when needed
+- `GR4CP_EXTRA_PLUGIN_DIRECTORIES=<dir>[:<dir>...]`: plugin directories searched in addition to the ones under the gnuradio4 prefix
+- `GR4CP_PLUGIN_DIRECTORIES=<dir>[:<dir>...]`: plugin directories that replace the ones derived from the gnuradio4 prefix
 - `USE_CCACHE=ON`: use ccache when available, enabled by default
 
 Built executables:

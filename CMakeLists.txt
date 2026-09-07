@@ -19,6 +19,8 @@ if(DEFINED ENV{GR4CP_GNURADIO4_PREFIX})
     set(_gr4cp_default_gnuradio4_prefix "$ENV{GR4CP_GNURADIO4_PREFIX}")
 endif()
 set(GR4CP_GNURADIO4_PREFIX "${_gr4cp_default_gnuradio4_prefix}" CACHE PATH "Optional prefix containing gnuradio4Config.cmake; leave empty to use CMAKE_PREFIX_PATH/default package discovery")
+set(GR4CP_EXTRA_PLUGIN_DIRECTORIES "" CACHE STRING "Colon-separated plugin directories to search in addition to the ones under the gnuradio4 prefix, for a block library installed under its own prefix")
+set(GR4CP_PLUGIN_DIRECTORIES "" CACHE STRING "Colon-separated plugin directories that replace the ones derived from the gnuradio4 prefix; use it when only a subset of an installation should be loaded")
 
 # Use ccache if found and enabled
 find_program(CCACHE_PROGRAM ccache)
@@ -182,10 +184,18 @@ if(GR4CP_HAVE_GNURADIO4)
             src/catalog/gr4_block_catalog_provider.cpp
             src/catalog/gr4_scheduler_catalog_provider.cpp
     )
+    if(GR4CP_PLUGIN_DIRECTORIES)
+        set(_gr4cp_plugin_dirs "${GR4CP_PLUGIN_DIRECTORIES}")
+    else()
+        set(_gr4cp_plugin_dirs "${GR4CP_GNURADIO4_LIB_DIR}/gnuradio-4/plugins:${GR4CP_GNURADIO4_LIB_DIR}")
+    endif()
+    if(GR4CP_EXTRA_PLUGIN_DIRECTORIES)
+        set(_gr4cp_plugin_dirs "${_gr4cp_plugin_dirs}:${GR4CP_EXTRA_PLUGIN_DIRECTORIES}")
+    endif()
     target_compile_definitions(gr4cp_core
         PUBLIC
             GR4CP_HAVE_GNURADIO4
-            GR4CP_DEFAULT_GNURADIO4_PLUGIN_DIR="${GR4CP_GNURADIO4_LIB_DIR}/gnuradio-4/plugins:${GR4CP_GNURADIO4_LIB_DIR}"
+            GR4CP_DEFAULT_GNURADIO4_PLUGIN_DIR="${_gr4cp_plugin_dirs}"
     )
     set(GR4CP_GNURADIO4_TARGETS
         gnuradio4::gnuradio-core
@@ -199,7 +209,7 @@ if(GR4CP_HAVE_GNURADIO4)
             ${GR4CP_GNURADIO4_TARGETS}
     )
     set(_gr4cp_test_env
-        "GNURADIO4_PLUGIN_DIRECTORIES=${GR4CP_GNURADIO4_LIB_DIR}/gnuradio-4/plugins:${GR4CP_GNURADIO4_LIB_DIR}\;LD_LIBRARY_PATH=$<TARGET_FILE_DIR:gr4cp_core>:${GR4CP_GNURADIO4_LIB_DIR}"
+        "GNURADIO4_PLUGIN_DIRECTORIES=${_gr4cp_plugin_dirs}\;LD_LIBRARY_PATH=$<TARGET_FILE_DIR:gr4cp_core>:${GR4CP_GNURADIO4_LIB_DIR}"
     )
 endif()
 
