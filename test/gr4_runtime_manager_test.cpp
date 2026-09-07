@@ -26,7 +26,7 @@ gr4cp::domain::Session make_session(std::string id, std::string yaml) {
 
 std::string continuous_graph_yaml() {
     return std::format(R"(blocks:
-  - id: "gr::basic::SignalGenerator<float32>"
+  - id: "gr::blocks::basic::SignalGenerator<float32>"
     parameters:
       name: "src0"
       sample_rate: 1000.0
@@ -36,7 +36,7 @@ std::string continuous_graph_yaml() {
       amplitude: 1.0
       offset: 0.0
       phase: 0.0
-  - id: "gr::testing::NullSink<float32>"
+  - id: "gr::blocks::testing::NullSink<float32>"
     parameters:
       name: "sink0"
 connections:
@@ -51,13 +51,13 @@ std::string legacy_minimal_graph_json() {
   "blocks": [
     {
       "instance_name": "src0",
-      "block_type": "gr::testing::NullSource<float32>",
+      "block_type": "gr::blocks::testing::NullSource<float32>",
       "enabled": true,
       "raw_parameters": {}
     },
     {
       "instance_name": "sink0",
-      "block_type": "gr::testing::NullSink<float32>",
+      "block_type": "gr::blocks::testing::NullSink<float32>",
       "enabled": true,
       "raw_parameters": {}
     }
@@ -79,10 +79,10 @@ metadata:
   name: Untitled Graph
   description: ""
 blocks:
-  - id: "gr::testing::NullSink<float32>"
+  - id: "gr::blocks::testing::NullSink<float32>"
     parameters:
       name: gr__testing__NullSink_float32__5
-  - id: "gr::testing::NullSource<float32>"
+  - id: "gr::blocks::testing::NullSource<float32>"
     parameters:
       name: gr__testing__NullSource_float32__2
 connections:
@@ -92,7 +92,7 @@ connections:
 
 std::string compatibility_studio_http_series_graph_yaml() {
     return R"(blocks:
-  - id: "gr::basic::SignalGenerator<float32>"
+  - id: "gr::blocks::basic::SignalGenerator<float32>"
     parameters:
       name: "src0"
       sample_rate: 1000.0
@@ -118,7 +118,7 @@ connections:
 
 std::string compatibility_studio_http_waterfall_graph_yaml() {
     return R"(blocks:
-  - id: "gr::basic::SignalGenerator<float32>"
+  - id: "gr::blocks::basic::SignalGenerator<float32>"
     parameters:
       name: "src0"
       sample_rate: 1000.0
@@ -251,7 +251,7 @@ TEST_F(Gr4RuntimeManagerTest, RunningSessionSupportsBlockSettingsMessageRoundTri
 
 TEST_F(Gr4RuntimeManagerTest, CompatibilityStudioBlockNameResolvesForSettingsRoundTrip) {
     auto session = make_session("runtime_studio_name_settings", R"(blocks:
-  - id: "gr::basic::SignalGenerator<float32>"
+  - id: "gr::blocks::basic::SignalGenerator<float32>"
     parameters:
       name: "gr__basic__SignalGenerator_float32__1"
       sample_rate: 1000.0
@@ -261,7 +261,7 @@ TEST_F(Gr4RuntimeManagerTest, CompatibilityStudioBlockNameResolvesForSettingsRou
       amplitude: 1.0
       offset: 0.0
       phase: 0.0
-  - id: "gr::testing::NullSink<float32>"
+  - id: "gr::blocks::testing::NullSink<float32>"
     parameters:
       name: "gr__testing__NullSink_float32__1"
 connections:
@@ -297,11 +297,11 @@ TEST_F(Gr4RuntimeManagerTest, RunningSessionAlsoResolvesInternalRuntimeIdentifie
 
     EXPECT_NO_THROW(runtime_.set_block_settings(
         session,
-        "gr::basic::SignalGenerator<float32>#0",
+        "gr::blocks::basic::SignalGenerator<float32>#0",
         gr::property_map{{"frequency", 900.0}},
         gr4cp::runtime::BlockSettingsMode::Staged));
 
-    const auto settings = runtime_.get_block_settings(session, "gr::basic::SignalGenerator<float32>#0");
+    const auto settings = runtime_.get_block_settings(session, "gr::blocks::basic::SignalGenerator<float32>#0");
     ASSERT_TRUE(settings.contains("frequency"));
     EXPECT_EQ(settings.at("frequency").value_or(0.0), 900.0);
 
