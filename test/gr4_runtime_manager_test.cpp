@@ -295,13 +295,24 @@ TEST_F(Gr4RuntimeManagerTest, RunningSessionAlsoResolvesInternalRuntimeIdentifie
     runtime_.start(session);
     std::this_thread::sleep_for(100ms);
 
+    const auto authored = runtime_.get_block_settings(session, "src0");
+    ASSERT_TRUE(authored.contains("unique_name"));
+    std::string runtime_identifier;
+    gr::pmt::ValueVisitor([&runtime_identifier](const auto& item) {
+        using T = std::decay_t<decltype(item)>;
+        if constexpr (std::same_as<T, std::pmr::string> || std::same_as<T, std::string> || std::same_as<T, std::string_view>) {
+            runtime_identifier = std::string(item);
+        }
+    }).visit(authored.at("unique_name"));
+    ASSERT_FALSE(runtime_identifier.empty());
+
     EXPECT_NO_THROW(runtime_.set_block_settings(
         session,
-        "gr::blocks::basic::SignalGenerator<float32>#0",
+        runtime_identifier,
         gr::property_map{{"frequency", 900.0}},
         gr4cp::runtime::BlockSettingsMode::Staged));
 
-    const auto settings = runtime_.get_block_settings(session, "gr::blocks::basic::SignalGenerator<float32>#0");
+    const auto settings = runtime_.get_block_settings(session, runtime_identifier);
     ASSERT_TRUE(settings.contains("frequency"));
     EXPECT_EQ(settings.at("frequency").value_or(0.0F), 900.0F);
 
