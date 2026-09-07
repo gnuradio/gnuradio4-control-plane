@@ -112,7 +112,7 @@ std::string compatibility_studio_http_series_graph_yaml() {
       window_size: 64
       channels: 1
 connections:
-  - ["src0", 0, "series0", 0]
+  - ["src0", "out", "series0", "in#0"]
 )";
 }
 
