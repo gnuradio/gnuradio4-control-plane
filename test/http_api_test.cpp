@@ -1,5 +1,6 @@
 #include "gr4cp/api/http_server.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <atomic>
 #include <condition_variable>
@@ -17,6 +18,7 @@
 #include <boost/asio.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/websocket.hpp>
+#include <gnuradio-4.0/PluginLoader.hpp>
 #include <gtest/gtest.h>
 #include <httplib.h>
 #include <nlohmann/json.hpp>
@@ -39,12 +41,18 @@ namespace beast = boost::beast;
 namespace websocket = beast::websocket;
 using tcp = asio::ip::tcp;
 
+constexpr std::string_view kStudioSeriesSinkId = "gr::studio::StudioSeriesSink<float32>";
 constexpr std::string_view kGenericStreamBlockId = "gr::testing::ManagedStreamBlock<float32>";
 constexpr std::string_view kGenericSpectrumBlockId = "gr::testing::ManagedSpectrumBlock<float32>";
 constexpr std::string_view kGenericMatrixBlockId = "gr::testing::ManagedMatrixBlock<float32>";
 constexpr std::string_view kSeriesPayloadFormat = "series-window-json-v1";
 constexpr std::string_view kSpectrumPayloadFormat = "dataset-xy-json-v1";
 constexpr std::string_view kMatrixPayloadFormat = "waterfall-spectrum-json-v1";
+
+bool block_is_registered(std::string_view block_id) {
+    const auto available = gr::globalPluginLoader().availableBlocks();
+    return std::ranges::any_of(available, [block_id](const auto& name) { return name == block_id; });
+}
 
 class TestBlockCatalogProvider final : public gr4cp::catalog::BlockCatalogProvider {
 public:
@@ -906,6 +914,10 @@ TEST_F(HttpApiTest, PostSessionsSuccess) {
 }
 
 TEST_F(RealRuntimeHttpApiTest, CompatibilityStudioSinkHttpRouteReachesRealRuntimeStream) {
+    if (!block_is_registered(kStudioSeriesSinkId)) {
+        GTEST_SKIP() << "block not registered: " << kStudioSeriesSinkId;
+    }
+
     const auto created = create_session_with_graph(compatibility_studio_http_poll_graph());
     const auto id = created["id"].get<std::string>();
 
@@ -937,6 +949,10 @@ TEST_F(RealRuntimeHttpApiTest, CompatibilityStudioSinkHttpRouteReachesRealRuntim
 }
 
 TEST_F(RealRuntimeHttpApiTest, CompatibilityStudioSinkStopRemovesBrowserRoute) {
+    if (!block_is_registered(kStudioSeriesSinkId)) {
+        GTEST_SKIP() << "block not registered: " << kStudioSeriesSinkId;
+    }
+
     const auto created = create_session_with_graph(compatibility_studio_http_poll_graph());
     const auto id = created["id"].get<std::string>();
 
