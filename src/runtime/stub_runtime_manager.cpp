@@ -37,9 +37,10 @@ void StubRuntimeManager::start(const domain::Session& session) {
     log_action("start", session);
 }
 
-void StubRuntimeManager::stop(const domain::Session& session) {
+std::optional<std::string> StubRuntimeManager::stop(const domain::Session& session) {
     log_action("stop", session);
     release_streams(session.id);
+    return std::nullopt;
 }
 
 void StubRuntimeManager::destroy(const domain::Session& session) {

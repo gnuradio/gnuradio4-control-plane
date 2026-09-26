@@ -42,7 +42,7 @@ protected:
     gr4cp::app::SessionStreamService streams;
     gr4cp::app::BlockCatalogService block_catalog{blocks};
     gr4cp::app::SchedulerCatalogService scheduler_catalog{schedulers};
-    gr4cp::app::BlockSettingsService settings{repository, runtime};
+    gr4cp::app::BlockSettingsService settings{sessions, runtime};
     gr4cp::api::WasmApi api{sessions, streams, block_catalog, scheduler_catalog, settings};
     gr4cp::api::HttpServer http_server{sessions, streams, block_catalog, scheduler_catalog, settings};
     std::jthread http_thread;
