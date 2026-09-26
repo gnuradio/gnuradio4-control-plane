@@ -175,9 +175,11 @@ Supported JSON value shapes are:
 - integer
 - floating point
 - string
+- array, each element one of these shapes; the block converts each element to its setting's element type
+- an object with exactly the two numbers `real` and `imag`, a complex value
 - nested object
 
-Arrays are rejected. Unsupported runtime reply shapes are surfaced as errors.
+A read returns a list setting as an array and a complex value as the object of `real` and `imag`.
 
 ## Stream Metadata
 
@@ -218,7 +220,7 @@ Do not introduce public stream, websocket, SSE, diagnostics, or history surfaces
 
 ## Error Handling
 
-Application services raise typed errors for validation, not-found, invalid-state, runtime, timeout, catalog, and scheduler-catalog failures. The HTTP layer maps those errors into stable JSON error responses.
+Application services raise typed errors for validation, not-found, invalid-state, runtime, catalog, and scheduler-catalog failures. The HTTP layer maps those errors into stable JSON error responses.
 
 Route handlers should not inspect exception internals beyond this mapping. Application services should provide messages that are useful to operators while preserving the narrow API contract.
 

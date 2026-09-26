@@ -332,8 +332,6 @@ ErrorDetails current_error_details() {
         return {409, "invalid_state", error.what()};
     } catch (const app::RuntimeError& error) {
         return {500, "runtime_error", error.what()};
-    } catch (const app::TimeoutError& error) {
-        return {504, "timeout", error.what()};
     } catch (const catalog::SchedulerCatalogLoadError& error) {
         return {500, "scheduler_catalog_error", error.what()};
     } catch (const catalog::CatalogLoadError& error) {

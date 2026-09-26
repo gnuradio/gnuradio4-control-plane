@@ -10,11 +10,6 @@
 
 namespace gr4cp::app {
 
-class TimeoutError : public std::runtime_error {
-public:
-    using std::runtime_error::runtime_error;
-};
-
 struct BlockSettingsUpdateResult {
     std::string session_id;
     std::string block;

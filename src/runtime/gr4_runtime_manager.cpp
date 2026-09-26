@@ -4,6 +4,7 @@
 #include <array>
 #include <cctype>
 #include <chrono>
+#include <complex>
 #include <concepts>
 #include <cstdlib>
 #include <expected>
@@ -170,6 +171,34 @@ gr::BlockHandle* resolve_runtime_block(std::map<std::string, gr::BlockHandle, st
     return only_match([requested_block_target](const gr::BlockHandle& block) {
         return settings_name(block) == requested_block_target;
     });
+}
+
+// Converts a double-precision complex patch value to single precision when the block holds a single-precision complex
+// value, and each such element of a list when the block holds a list of them. The framework converts neither complex
+// precision to the other.
+gr::pmt::Value with_held_complex_precision(const gr::pmt::Value& value, const std::optional<gr::pmt::Value>& held) {
+    if (!held.has_value()) {
+        return value;
+    }
+    const auto narrowed = [](const gr::pmt::Value& item) -> gr::pmt::Value {
+        if (const auto* wide = item.get_if<std::complex<double>>(); wide != nullptr) {
+            return std::complex<float>(static_cast<float>(wide->real()), static_cast<float>(wide->imag()));
+        }
+        return item;
+    };
+    if (held->get_if<std::complex<float>>() != nullptr) {
+        return narrowed(value);
+    }
+    const auto* elements = value.get_if<gr::Tensor<gr::pmt::Value>>();
+    if (held->get_if<gr::Tensor<std::complex<float>>>() == nullptr || elements == nullptr) {
+        return value;
+    }
+    gr::Tensor<gr::pmt::Value> result;
+    result.reserve(elements->size());
+    for (const auto& element : *elements) {
+        result.push_back(narrowed(element));
+    }
+    return result;
 }
 
 SessionNotRunningError not_running(const domain::Session& session, std::string_view action) {
@@ -599,8 +628,31 @@ void Gr4RuntimeManager::set_block_settings(const domain::Session& session,
     if (block == nullptr) {
         throw make_block_not_found_error(run->execution.blocks, block_target);
     }
-    if (const auto staged = block->setStaged(patch); !staged.has_value()) {
-        throw runtime_error(session, "settings update", staged.error().message);
+    const auto accepted = block->writableMembers();
+    std::string foreign;
+    for (const auto& [key, _] : patch) {
+        if (!accepted.contains(std::string(key))) {
+            foreign += foreign.empty() ? std::string(key) : ", " + std::string(key);
+        }
+    }
+    if (!foreign.empty()) {
+        throw SettingsRefusedError(std::format("block {} has no setting named {}", block_target, foreign));
+    }
+    gr::property_map converted;
+    for (const auto& [key, value] : patch) {
+        converted.insert_or_assign(key, with_held_complex_precision(value, block->get(std::string(key))));
+    }
+    const auto staged = block->setStaged(converted);
+    if (!staged.has_value()) {
+        throw SettingsRefusedError(std::format("block {} refused the settings: {}", block_target, staged.error().message));
+    }
+    // setStaged returns the pairs the block does not declare, and after the key check above it returns none.
+    if (!staged->empty()) {
+        std::string undeclared;
+        for (const auto& [key, _] : *staged) {
+            undeclared += undeclared.empty() ? std::string(key) : ", " + std::string(key);
+        }
+        throw SettingsRefusedError(std::format("block {} does not declare {}", block_target, undeclared));
     }
 }
 

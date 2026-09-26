@@ -889,6 +889,77 @@ TEST_F(Gr4RuntimeManagerTest, SchedulerCatalogListsAndRegistersTheAliases) {
     }
 }
 
+TEST_F(Gr4RuntimeManagerTest, ImmediateSettingsUpdateAnswersWithinTheCall) {
+    auto session = make_session("runtime_immediate_settings", continuous_graph_yaml());
+    runtime_.prepare(session);
+    runtime_.start(session);
+
+    // Staging takes the block's settings lock and returns. The 100 ms bound is wall-clock time with room for a loaded
+    // machine.
+    const auto before = std::chrono::steady_clock::now();
+    EXPECT_NO_THROW(runtime_.set_block_settings(
+        session, "src0", gr::property_map{{"amplitude", 0.5}}, gr4cp::runtime::BlockSettingsMode::Immediate));
+    EXPECT_LT(std::chrono::steady_clock::now() - before, 100ms);
+    const auto settings = read_setting_until(runtime_, session, "src0", "amplitude", 0.5F);
+    EXPECT_EQ(settings.at("amplitude").value_or(0.0F), 0.5F);
+
+    runtime_.stop(session);
+    runtime_.destroy(session);
+}
+
+TEST_F(Gr4RuntimeManagerTest, UndeclaredSettingKeyIsRefusedAndNothingStaged) {
+    auto session = make_session("runtime_undeclared_setting", continuous_graph_yaml());
+    runtime_.prepare(session);
+    runtime_.start(session);
+
+    try {
+        runtime_.set_block_settings(session,
+                                    "src0",
+                                    gr::property_map{{"tone_frequency", 700.0}, {"not_a_setting", 1.0}},
+                                    gr4cp::runtime::BlockSettingsMode::Staged);
+        FAIL() << "expected SettingsRefusedError";
+    } catch (const gr4cp::runtime::SettingsRefusedError& error) {
+        EXPECT_NE(std::string(error.what()).find("not_a_setting"), std::string::npos) << error.what();
+    }
+
+    // a later accepted patch applies at a work call, which would also apply anything the refused one staged
+    runtime_.set_block_settings(session, "src0", gr::property_map{{"offset", 0.125}}, gr4cp::runtime::BlockSettingsMode::Staged);
+    const auto settings = read_setting_until(runtime_, session, "src0", "offset", 0.125F);
+    EXPECT_EQ(settings.at("offset").value_or(0.0F), 0.125F);
+    EXPECT_EQ(settings.at("tone_frequency").value_or(0.0F), 25.0F);
+
+    runtime_.stop(session);
+    runtime_.destroy(session);
+}
+
+TEST_F(Gr4RuntimeManagerTest, ValueOfTheWrongTypeIsRefusedWithTheBlocksReason) {
+    auto session = make_session("runtime_wrong_type_setting", continuous_graph_yaml());
+    runtime_.prepare(session);
+    runtime_.start(session);
+
+    try {
+        runtime_.set_block_settings(session,
+                                    "src0",
+                                    gr::property_map{{"tone_frequency", gr::property_map{{"hz", 700.0}}}, {"amplitude", 0.25}},
+                                    gr4cp::runtime::BlockSettingsMode::Staged);
+        FAIL() << "expected SettingsRefusedError";
+    } catch (const gr4cp::runtime::SettingsRefusedError& error) {
+        const std::string message = error.what();
+        const std::string_view lead = "refused the settings: ";
+        const auto reason = message.find(lead);
+        ASSERT_NE(reason, std::string::npos) << message;
+        EXPECT_GT(message.size(), reason + lead.size()) << "the refusal carries no reason: " << message;
+    }
+
+    runtime_.set_block_settings(session, "src0", gr::property_map{{"offset", 0.125}}, gr4cp::runtime::BlockSettingsMode::Staged);
+    const auto settings = read_setting_until(runtime_, session, "src0", "offset", 0.125F);
+    EXPECT_EQ(settings.at("tone_frequency").value_or(0.0F), 25.0F);
+    EXPECT_EQ(settings.at("amplitude").value_or(0.0F), 1.0F);
+
+    runtime_.stop(session);
+    runtime_.destroy(session);
+}
+
 // A deleted session destroys its graph, and with it every block the graph held.
 TEST_F(Gr4RuntimeManagerTest, DeletedSessionReleasesItsBlocks) {
     gr4cp::test::register_test_blocks();

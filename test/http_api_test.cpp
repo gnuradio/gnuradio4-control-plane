@@ -4,6 +4,7 @@
 #include <chrono>
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdio>
 #include <fstream>
 #include <iomanip>
@@ -958,6 +959,37 @@ TEST_F(HttpApiTest, PostSessionsSuccess) {
     EXPECT_FALSE(body.contains("grc_content"));
 }
 
+TEST_F(RealRuntimeHttpApiTest, PostBlockSettingsImmediateModeUsesImmediateEndpoint) {
+    const auto created = create_session_with_graph(R"(blocks:
+  - id: "gr::blocks::basic::SignalGenerator<float32>"
+    parameters:
+      name: "sig0"
+      sample_rate: 1000.0
+      chunk_size: 32
+  - id: "gr::blocks::testing::NullSink<float32>"
+    parameters:
+      name: "sink0"
+connections:
+  - ["sig0", 0, "sink0", 0]
+)");
+    const auto id = created["id"].get<std::string>();
+    const auto started = client->Post(("/sessions/" + id + "/start").c_str(), "", "application/json");
+    ASSERT_TRUE(started);
+    ASSERT_EQ(started->status, 200);
+
+    const auto response = client->Post(("/sessions/" + id + "/blocks/sig0/settings?mode=immediate").c_str(),
+                                       R"({"amplitude":0.5})",
+                                       "application/json");
+
+    ASSERT_TRUE(response);
+    EXPECT_EQ(response->status, 200);
+    EXPECT_EQ(parse_json(response)["applied_via"], "settings");
+
+    const auto stopped = client->Post(("/sessions/" + id + "/stop").c_str(), "", "application/json");
+    ASSERT_TRUE(stopped);
+    EXPECT_EQ(stopped->status, 200);
+}
+
 TEST_F(RealRuntimeHttpApiTest, CompatibilityStudioSinkHttpRouteReachesRealRuntimeStream) {
     if (!block_is_registered(kStudioSeriesSinkId)) {
         GTEST_SKIP() << "block not registered: " << kStudioSeriesSinkId;
@@ -1214,6 +1246,71 @@ connections:
                 growth_per_session,
                 baseline.threads,
                 after.threads);
+}
+
+const std::string kVectorSettingsGraph = R"(blocks:
+  - id: "gr4cp::test::VectorSettingsSource"
+    parameters:
+      name: "vector0"
+  - id: "gr::blocks::testing::NullSink<float32>"
+    parameters:
+      name: "sink0"
+connections:
+  - ["vector0", 0, "sink0", 0]
+)";
+
+TEST_F(RealRuntimeHttpApiTest, VectorAndComplexSettingsReadAsArraysAndParts) {
+    gr4cp::test::register_test_blocks();
+    const auto id = create_session_with_graph(kVectorSettingsGraph)["id"].get<std::string>();
+    const auto started = client->Post(("/sessions/" + id + "/start").c_str(), "", "application/json");
+    ASSERT_TRUE(started);
+    ASSERT_EQ(started->status, 200);
+
+    const auto read = client->Get(("/sessions/" + id + "/blocks/vector0/settings").c_str());
+    ASSERT_TRUE(read);
+    ASSERT_EQ(read->status, 200) << read->body;
+    const auto settings = parse_json(read)["settings"];
+    EXPECT_EQ(settings["gains"], nlohmann::json::parse("[1.0, 2.0]")) << settings.dump();
+    EXPECT_EQ(settings["antennas"], nlohmann::json::parse(R"(["RX", "TX"])")) << settings.dump();
+    EXPECT_EQ(settings["correction"], nlohmann::json::parse(R"({"real": 1.0, "imag": -0.5})")) << settings.dump();
+    EXPECT_EQ(settings["taps"], nlohmann::json::parse(R"([{"real": 1.0, "imag": 0.0}])")) << settings.dump();
+}
+
+TEST_F(RealRuntimeHttpApiTest, VectorAndComplexSettingsPatchApplies) {
+    gr4cp::test::register_test_blocks();
+    const auto id = create_session_with_graph(kVectorSettingsGraph)["id"].get<std::string>();
+    const auto started = client->Post(("/sessions/" + id + "/start").c_str(), "", "application/json");
+    ASSERT_TRUE(started);
+    ASSERT_EQ(started->status, 200);
+
+    const auto patched = client->Post(("/sessions/" + id + "/blocks/vector0/settings").c_str(),
+                                      R"({"gains":[0.5, 4, 0.25],"antennas":["A"],"correction":{"real":0.0,"imag":2.0},)"
+                                      R"("taps":[{"real":0.5,"imag":-0.5},{"real":0.25,"imag":0}]})",
+                                      "application/json");
+    ASSERT_TRUE(patched);
+    ASSERT_EQ(patched->status, 200) << patched->body;
+
+    // a staged patch applies at the block's next work call
+    nlohmann::json settings;
+    const auto expected_gains = nlohmann::json::parse("[0.5, 4.0, 0.25]");
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    do {
+        const auto read = client->Get(("/sessions/" + id + "/blocks/vector0/settings").c_str());
+        ASSERT_TRUE(read);
+        ASSERT_EQ(read->status, 200) << read->body;
+        settings = parse_json(read)["settings"];
+    } while (settings["gains"] != expected_gains && std::chrono::steady_clock::now() < deadline);
+    EXPECT_EQ(settings["gains"], expected_gains) << settings.dump();
+    EXPECT_EQ(settings["antennas"], nlohmann::json::parse(R"(["A"])")) << settings.dump();
+    EXPECT_EQ(settings["correction"], nlohmann::json::parse(R"({"real": 0.0, "imag": 2.0})")) << settings.dump();
+    EXPECT_EQ(settings["taps"], nlohmann::json::parse(R"([{"real": 0.5, "imag": -0.5}, {"real": 0.25, "imag": 0.0}])"))
+        << settings.dump();
+
+    const auto refused = client->Post(("/sessions/" + id + "/blocks/vector0/settings").c_str(),
+                                      R"({"gains":[1.0, "loud"]})",
+                                      "application/json");
+    ASSERT_TRUE(refused);
+    EXPECT_EQ(refused->status, 400) << refused->body;
 }
 
 TEST_F(HttpApiTest, GetBlocksSuccess) {
@@ -2639,19 +2736,6 @@ TEST_F(HttpApiTest, PostBlockSettingsUsesStagedModeByDefault) {
     EXPECT_EQ(runtime_manager.last_patch.at("frequency").value_or(0.0), 1250.0);
 }
 
-TEST_F(HttpApiTest, PostBlockSettingsImmediateModeUsesImmediateEndpoint) {
-    const auto id = create_running_session();
-
-    const auto response = client->Post(("/sessions/" + id + "/blocks/sig0/settings?mode=immediate").c_str(),
-                                       R"({"enabled":true})",
-                                       "application/json");
-
-    ASSERT_TRUE(response);
-    EXPECT_EQ(response->status, 200);
-    EXPECT_EQ(parse_json(response)["applied_via"], "settings");
-    EXPECT_EQ(runtime_manager.last_mode, gr4cp::runtime::BlockSettingsMode::Immediate);
-}
-
 TEST_F(HttpApiTest, GetBlockSettingsReturnsCurrentSettings) {
     const auto id = create_running_session();
     runtime_manager.settings[id]["sig0"] = gr::property_map{
@@ -2726,7 +2810,7 @@ TEST_F(HttpApiTest, BlockSettingsInvalidJsonBodyReturnsValidationError) {
     EXPECT_EQ(parse_json(response)["error"]["code"], "validation_error");
 }
 
-TEST_F(HttpApiTest, BlockSettingsUnsupportedArrayReturnsValidationError) {
+TEST_F(HttpApiTest, BlockSettingsArrayReachesTheRuntimeElementByElement) {
     const auto id = create_running_session();
 
     const auto response = client->Post(("/sessions/" + id + "/blocks/sig0/settings").c_str(),
@@ -2734,8 +2818,11 @@ TEST_F(HttpApiTest, BlockSettingsUnsupportedArrayReturnsValidationError) {
                                        "application/json");
 
     ASSERT_TRUE(response);
-    EXPECT_EQ(response->status, 400);
-    EXPECT_EQ(parse_json(response)["error"]["code"], "validation_error");
+    EXPECT_EQ(response->status, 200);
+    const auto* values = runtime_manager.last_patch.at("values").get_if<gr::Tensor<gr::pmt::Value>>();
+    ASSERT_NE(values, nullptr);
+    ASSERT_EQ(values->size(), 3U);
+    EXPECT_EQ((*values)[2].value_or(std::int64_t{0}), 3);
 }
 
 TEST_F(HttpApiTest, BlockSettingsRuntimeFailureReturnsRuntimeError) {
@@ -2749,18 +2836,6 @@ TEST_F(HttpApiTest, BlockSettingsRuntimeFailureReturnsRuntimeError) {
     ASSERT_TRUE(response);
     EXPECT_EQ(response->status, 500);
     EXPECT_EQ(parse_json(response)["error"]["code"], "runtime_error");
-}
-
-TEST_F(HttpApiTest, BlockSettingsReplyTimeoutReturnsGatewayTimeout) {
-    const auto id = create_running_session();
-    runtime_manager.get_exception =
-        std::make_exception_ptr(gr4cp::runtime::ReplyTimeoutError("timed out waiting for runtime reply from block sig0"));
-
-    const auto response = client->Get(("/sessions/" + id + "/blocks/sig0/settings").c_str());
-
-    ASSERT_TRUE(response);
-    EXPECT_EQ(response->status, 504);
-    EXPECT_EQ(parse_json(response)["error"]["code"], "timeout");
 }
 
 TEST_F(HttpApiTest, BlockSettingsNestedObjectRoundTrips) {
