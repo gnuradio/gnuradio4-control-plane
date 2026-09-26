@@ -17,7 +17,7 @@ public:
 
     void prepare(const domain::Session& session) override;
     void start(const domain::Session& session) override;
-    void stop(const domain::Session& session) override;
+    std::optional<std::string> stop(const domain::Session& session) override;
     void destroy(const domain::Session& session) override;
     std::optional<domain::StreamRuntimePlan> active_stream_plan(const domain::Session& session) override;
     HttpStreamResponse fetch_http_stream(const domain::Session& session, const std::string& stream_id) override;
@@ -27,6 +27,7 @@ public:
                             const gr::property_map& patch,
                             BlockSettingsMode mode) override;
     gr::property_map get_block_settings(const domain::Session& session, const std::string& block_unique_name) override;
+    RunObservation observe(const domain::Session&) override { return {}; }
 
 private:
     void release_streams(const std::string& session_id);

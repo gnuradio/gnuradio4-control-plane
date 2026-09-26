@@ -8,9 +8,8 @@
 
 namespace gr4cp::app {
 
-BlockSettingsService::BlockSettingsService(storage::SessionRepository& repository,
-                                           runtime::RuntimeManager& runtime_manager)
-    : repository_(repository), runtime_manager_(runtime_manager) {}
+BlockSettingsService::BlockSettingsService(SessionService& sessions, runtime::RuntimeManager& runtime_manager)
+    : sessions_(sessions), runtime_manager_(runtime_manager) {}
 
 BlockSettingsUpdateResult BlockSettingsService::update(const std::string& session_id,
                                                        const std::string& block_unique_name,
@@ -23,6 +22,8 @@ BlockSettingsUpdateResult BlockSettingsService::update(const std::string& sessio
         runtime_manager_.set_block_settings(session, block_unique_name, property_map, mode);
     } catch (const runtime::BlockNotFoundError& error) {
         throw NotFoundError(error.what());
+    } catch (const runtime::SessionNotRunningError& error) {
+        throw InvalidStateError(error.what());
     } catch (const runtime::ReplyTimeoutError& error) {
         throw TimeoutError(error.what());
     } catch (const std::exception& error) {
@@ -45,6 +46,8 @@ BlockSettingsService::Json BlockSettingsService::get(const std::string& session_
         return property_map_to_json(runtime_manager_.get_block_settings(session, block_unique_name));
     } catch (const runtime::BlockNotFoundError& error) {
         throw NotFoundError(error.what());
+    } catch (const runtime::SessionNotRunningError& error) {
+        throw InvalidStateError(error.what());
     } catch (const runtime::ReplyTimeoutError& error) {
         throw TimeoutError(error.what());
     } catch (const std::exception& error) {
@@ -52,15 +55,12 @@ BlockSettingsService::Json BlockSettingsService::get(const std::string& session_
     }
 }
 
-domain::Session BlockSettingsService::load_running_session_or_throw(const std::string& session_id) const {
-    const auto session = repository_.get(session_id);
-    if (!session.has_value()) {
-        throw NotFoundError("session not found: " + session_id);
-    }
-    if (session->state != domain::SessionState::Running) {
+domain::Session BlockSettingsService::load_running_session_or_throw(const std::string& session_id) {
+    auto session = sessions_.get(session_id);
+    if (session.state != domain::SessionState::Running) {
         throw InvalidStateError("session not running: " + session_id);
     }
-    return *session;
+    return session;
 }
 
 gr::property_map BlockSettingsService::json_to_property_map(const Json& value) {
