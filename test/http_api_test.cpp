@@ -4,12 +4,15 @@
 #include <chrono>
 #include <atomic>
 #include <condition_variable>
+#include <cstdio>
+#include <fstream>
 #include <iomanip>
 #include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <sstream>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -33,7 +36,23 @@
 #include "gr4cp/runtime/runtime_manager.hpp"
 #include "gr4cp/runtime/stream_binding_allocator.hpp"
 #include "gr4cp/storage/in_memory_session_repository.hpp"
+#include "test_blocks.hpp"
 #include "test_plugin_loader.hpp"
+
+#if defined(__SANITIZE_ADDRESS__)
+#define GR4CP_TEST_ADDRESS_SANITIZER 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define GR4CP_TEST_ADDRESS_SANITIZER 1
+#endif
+#endif
+
+#if defined(GR4CP_TEST_ADDRESS_SANITIZER)
+// The sanitizer runtime's count of live heap bytes. GCC does not install <sanitizer/allocator_interface.h>.
+extern "C" std::size_t __sanitizer_get_current_allocated_bytes();
+#elif defined(__GLIBC__)
+#include <malloc.h>
+#endif
 
 namespace {
 
@@ -53,6 +72,40 @@ constexpr std::string_view kMatrixPayloadFormat = "waterfall-spectrum-json-v1";
 bool block_is_registered(std::string_view block_id) {
     const auto available = gr4cp::test::plugin_loader()->availableBlocks();
     return std::ranges::any_of(available, [block_id](const auto& name) { return name == block_id; });
+}
+
+struct ProcessStatus {
+    double resident_mb = 0.0;
+    int threads = 0;
+};
+
+// Reads the process's resident memory and thread count from /proc/self/status.
+ProcessStatus process_status() {
+    ProcessStatus status;
+    std::ifstream file("/proc/self/status");
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.starts_with("VmRSS:")) {
+            status.resident_mb = std::stod(line.substr(6)) / 1024.0;
+        } else if (line.starts_with("Threads:")) {
+            status.threads = std::stoi(line.substr(8));
+        }
+    }
+    return status;
+}
+
+// Returns the bytes the process holds in live heap allocations, or nothing where no count is available. The
+// sanitizer's count leaves out the freed blocks in its quarantine. glibc's count includes the small freed blocks each
+// thread caches, up to about 240 KB a thread.
+std::optional<std::size_t> live_heap_bytes() {
+#if defined(GR4CP_TEST_ADDRESS_SANITIZER)
+    return __sanitizer_get_current_allocated_bytes();
+#elif defined(__GLIBC__)
+    const auto info = ::mallinfo2();
+    return info.uordblks + info.hblkhd;
+#else
+    return std::nullopt;
+#endif
 }
 
 class TestBlockCatalogProvider final : public gr4cp::catalog::BlockCatalogProvider {
@@ -508,7 +561,7 @@ protected:
             }
         }
         void start(const gr4cp::domain::Session&) override {}
-        void stop(const gr4cp::domain::Session& session) override {
+        std::optional<std::string> stop(const gr4cp::domain::Session& session) override {
             {
                 std::lock_guard lock(control_mutex_);
                 stop_entered_.insert(session.id);
@@ -521,6 +574,7 @@ protected:
                 std::rethrow_exception(stop_exception);
             }
             release_streams(session.id);
+            return std::nullopt;
         }
         void destroy(const gr4cp::domain::Session& session) override {
             release_streams(session.id);
@@ -601,6 +655,8 @@ protected:
             }
             return settings[session.id][block_unique_name];
         }
+
+        gr4cp::runtime::RunObservation observe(const gr4cp::domain::Session&) override { return {}; }
 
         int set_calls{};
         int get_calls{};
@@ -810,7 +866,7 @@ protected:
     TestSchedulerCatalogProvider scheduler_catalog_provider;
     gr4cp::app::SessionService service{repository, runtime_manager};
     gr4cp::app::SessionStreamService session_stream_service;
-    gr4cp::app::BlockSettingsService block_settings_service{repository, runtime_manager};
+    gr4cp::app::BlockSettingsService block_settings_service{service, runtime_manager};
     gr4cp::app::BlockCatalogService block_catalog_service{block_catalog_provider};
     gr4cp::app::SchedulerCatalogService scheduler_catalog_service{scheduler_catalog_provider};
     int port{};
@@ -882,6 +938,23 @@ protected:
         return parse_json(response);
     }
 
+    // Returns true when a settings read of `block` through the runtime manager fails as not running within ten seconds.
+    // The session service reads nothing meanwhile, and the session still reads running.
+    bool wait_until_run_is_ending(const std::string& id, const std::string& block) {
+        gr4cp::domain::Session session;
+        session.id = id;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (std::chrono::steady_clock::now() < deadline) {
+            try {
+                (void)runtime_manager.get_block_settings(session, block);
+            } catch (const gr4cp::runtime::SessionNotRunningError&) {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return false;
+    }
+
     std::unique_ptr<gr4cp::api::HttpServer> server;
     gr4cp::storage::InMemorySessionRepository repository;
     gr4cp::runtime::Gr4RuntimeManager runtime_manager{gr4cp::test::plugin_loader()};
@@ -889,7 +962,7 @@ protected:
     TestSchedulerCatalogProvider scheduler_catalog_provider;
     gr4cp::app::SessionService service{repository, runtime_manager};
     gr4cp::app::SessionStreamService session_stream_service;
-    gr4cp::app::BlockSettingsService block_settings_service{repository, runtime_manager};
+    gr4cp::app::BlockSettingsService block_settings_service{service, runtime_manager};
     gr4cp::app::BlockCatalogService block_catalog_service{block_catalog_provider};
     gr4cp::app::SchedulerCatalogService scheduler_catalog_service{scheduler_catalog_provider};
     int port{};
@@ -972,6 +1045,263 @@ TEST_F(RealRuntimeHttpApiTest, CompatibilityStudioSinkStopRemovesBrowserRoute) {
     const auto after_stop = client->Get(("/sessions/" + id + "/streams/series0/http").c_str());
     ASSERT_TRUE(after_stop);
     EXPECT_EQ(after_stop->status, 409);
+}
+
+TEST_F(RealRuntimeHttpApiTest, DeleteOfARunThatFailedUnreadRemovesTheSession) {
+    gr4cp::test::register_test_blocks();
+    const auto created = create_session_with_graph(R"(blocks:
+  - id: "gr4cp::test::FailingSource"
+    parameters:
+      name: "failing0"
+  - id: "gr::blocks::basic::NullSink<float32>"
+    parameters:
+      name: "sink0"
+connections:
+  - ["failing0", 0, "sink0", 0]
+)");
+    const auto id = created["id"].get<std::string>();
+    const auto started = client->Post(("/sessions/" + id + "/start").c_str(), "", "application/json");
+    ASSERT_TRUE(started);
+    ASSERT_EQ(started->status, 200);
+    ASSERT_TRUE(wait_until_run_is_ending(id, "failing0"));
+
+    const auto removed = client->Delete(("/sessions/" + id).c_str());
+    ASSERT_TRUE(removed);
+    EXPECT_EQ(removed->status, 204) << removed->body;
+
+    const auto read = client->Get(("/sessions/" + id).c_str());
+    ASSERT_TRUE(read);
+    EXPECT_EQ(read->status, 404);
+}
+
+TEST_F(RealRuntimeHttpApiTest, SettingsOfAFiniteRunThatEndedUnreadAreRefused) {
+    gr4cp::test::register_test_blocks();
+    const auto created = create_session_with_graph(R"(blocks:
+  - id: "gr4cp::test::FiniteSource"
+    parameters:
+      name: "finite0"
+  - id: "gr::blocks::basic::NullSink<float32>"
+    parameters:
+      name: "sink0"
+connections:
+  - ["finite0", 0, "sink0", 0]
+)");
+    const auto id = created["id"].get<std::string>();
+    const auto started = client->Post(("/sessions/" + id + "/start").c_str(), "", "application/json");
+    ASSERT_TRUE(started);
+    ASSERT_EQ(started->status, 200);
+    ASSERT_TRUE(wait_until_run_is_ending(id, "finite0"));
+
+    const auto response = client->Post(("/sessions/" + id + "/blocks/finite0/settings").c_str(),
+                                       R"({"n_samples":8})",
+                                       "application/json");
+    ASSERT_TRUE(response);
+    EXPECT_EQ(response->status, 409) << response->body;
+
+    std::string state;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    do {
+        const auto read = client->Get(("/sessions/" + id).c_str());
+        ASSERT_TRUE(read);
+        state = parse_json(read)["state"].get<std::string>();
+    } while (state == "running" && std::chrono::steady_clock::now() < deadline);
+    EXPECT_EQ(state, "stopped");
+}
+
+TEST_F(RealRuntimeHttpApiTest, StopOfARunThatFailedUnreadAnswersWithTheRunsError) {
+    gr4cp::test::register_test_blocks();
+    const auto created = create_session_with_graph(R"(blocks:
+  - id: "gr4cp::test::FailingSource"
+    parameters:
+      name: "failing0"
+  - id: "gr::blocks::basic::NullSink<float32>"
+    parameters:
+      name: "sink0"
+connections:
+  - ["failing0", 0, "sink0", 0]
+)");
+    const auto id = created["id"].get<std::string>();
+    const auto started = client->Post(("/sessions/" + id + "/start").c_str(), "", "application/json");
+    ASSERT_TRUE(started);
+    ASSERT_EQ(started->status, 200);
+    ASSERT_TRUE(wait_until_run_is_ending(id, "failing0"));
+
+    const auto stopped = client->Post(("/sessions/" + id + "/stop").c_str(), "", "application/json");
+    ASSERT_TRUE(stopped);
+    ASSERT_EQ(stopped->status, 200) << stopped->body;
+    const auto read = client->Get(("/sessions/" + id).c_str());
+    ASSERT_TRUE(read);
+    ASSERT_EQ(read->status, 200) << read->body;
+
+    for (const auto& body : {parse_json(stopped), parse_json(read)}) {
+        EXPECT_EQ(body["state"], "error") << body.dump();
+        ASSERT_TRUE(body["last_error"].is_string()) << body.dump();
+        EXPECT_NE(body["last_error"].get<std::string>().find("the source fails"), std::string::npos) << body.dump();
+    }
+}
+
+TEST_F(RealRuntimeHttpApiTest, StopOfARunThatFailedAfterAReadAnswersWithTheRunsError) {
+    gr4cp::test::register_test_blocks();
+    const auto created = create_session_with_graph(R"(blocks:
+  - id: "gr4cp::test::FailingSource"
+    parameters:
+      name: "failing0"
+  - id: "gr::blocks::basic::NullSink<float32>"
+    parameters:
+      name: "sink0"
+connections:
+  - ["failing0", 0, "sink0", 0]
+)");
+    const auto id = created["id"].get<std::string>();
+    const auto started = client->Post(("/sessions/" + id + "/start").c_str(), "", "application/json");
+    ASSERT_TRUE(started);
+    ASSERT_EQ(started->status, 200);
+    ASSERT_TRUE(wait_until_run_is_ending(id, "failing0"));
+    const auto first_read = client->Get(("/sessions/" + id).c_str());
+    ASSERT_TRUE(first_read);
+    ASSERT_EQ(parse_json(first_read)["state"], "error") << first_read->body;
+
+    const auto stopped = client->Post(("/sessions/" + id + "/stop").c_str(), "", "application/json");
+    ASSERT_TRUE(stopped);
+    ASSERT_EQ(stopped->status, 200) << stopped->body;
+    const auto read = client->Get(("/sessions/" + id).c_str());
+    ASSERT_TRUE(read);
+    ASSERT_EQ(read->status, 200) << read->body;
+
+    for (const auto& body : {parse_json(stopped), parse_json(read)}) {
+        EXPECT_EQ(body["state"], "error") << body.dump();
+        EXPECT_EQ(body["last_error"], parse_json(first_read)["last_error"]) << body.dump();
+    }
+}
+
+TEST_F(RealRuntimeHttpApiTest, StartOfAFiniteRunThatEndedUnreadStartsItAgain) {
+    gr4cp::test::register_test_blocks();
+    const auto created = create_session_with_graph(R"(blocks:
+  - id: "gr4cp::test::FiniteSource"
+    parameters:
+      name: "finite0"
+  - id: "gr::blocks::basic::NullSink<float32>"
+    parameters:
+      name: "sink0"
+connections:
+  - ["finite0", 0, "sink0", 0]
+)");
+    const auto id = created["id"].get<std::string>();
+    const auto started = client->Post(("/sessions/" + id + "/start").c_str(), "", "application/json");
+    ASSERT_TRUE(started);
+    ASSERT_EQ(started->status, 200);
+    ASSERT_TRUE(wait_until_run_is_ending(id, "finite0"));
+
+    // The scheduler has left its running state, and the run ends right after it. A start before that end answers 409.
+    int status = 0;
+    nlohmann::json body;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    do {
+        const auto restarted = client->Post(("/sessions/" + id + "/start").c_str(), "", "application/json");
+        ASSERT_TRUE(restarted);
+        status = restarted->status;
+        body = parse_json(restarted);
+        if (status == 409) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    } while (status == 409 && std::chrono::steady_clock::now() < deadline);
+    EXPECT_EQ(status, 200) << body.dump();
+    EXPECT_EQ(body.value("state", std::string()), "running") << body.dump();
+}
+
+// Twenty sessions go through create, start, stop and delete over HTTP, each request on whichever server thread takes
+// it. The first session starts the thread pools the scheduler and the blocks keep for the process's life, and the
+// baseline is read after it. The case counts the bytes in live heap allocations, where a deleted session that is still
+// held keeps its graph. The twenty sessions together must leave less than the smallest heap one running session took.
+// The resident size is printed but not bounded. It counts the freed memory the allocator keeps, and the address
+// sanitizer keeps up to 256 MB of freed blocks to catch a use after free.
+TEST_F(RealRuntimeHttpApiTest, DeletedSessionsReturnTheirThreadsAndMemory) {
+    if (!live_heap_bytes().has_value()) {
+        GTEST_SKIP() << "this C library gives no count of live heap bytes";
+    }
+    const std::string graph = R"(blocks:
+  - id: gr::blocks::basic::SignalGenerator<float32>
+    parameters:
+      name: gen
+      sample_rate: !!float32 48000.0
+      chunk_size: !!uint32 480
+      signal_type: Sin
+      tone_frequency: !!float32 1000.0
+      amplitude: !!float32 1.0
+  - id: gr::blocks::math::MultiplyConst<float32>
+    parameters:
+      name: gain
+      value: !!float32 0.5
+  - id: gr::blocks::basic::NullSink<float32>
+    parameters:
+      name: sink
+  - id: gr::blocks::testing::CountingSink<float32>
+    parameters:
+      name: counter
+connections:
+  - [gen, out, gain, in]
+  - [gain, out, sink, in]
+  - [gain, out, counter, in]
+)";
+    std::vector<std::size_t> running_heaps;
+    const auto run_session = [this, &graph, &running_heaps] {
+        const auto heap_before = *live_heap_bytes();
+        const auto id = create_session_with_graph(graph)["id"].get<std::string>();
+        const auto started = client->Post(("/sessions/" + id + "/start").c_str(), "", "application/json");
+        ASSERT_TRUE(started);
+        ASSERT_EQ(started->status, 200) << started->body;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        const auto heap_running = *live_heap_bytes();
+        running_heaps.push_back(heap_running > heap_before ? heap_running - heap_before : 0U);
+        const auto stopped = client->Post(("/sessions/" + id + "/stop").c_str(), "", "application/json");
+        ASSERT_TRUE(stopped);
+        ASSERT_EQ(stopped->status, 200) << stopped->body;
+        const auto removed = client->Delete(("/sessions/" + id).c_str());
+        ASSERT_TRUE(removed);
+        ASSERT_EQ(removed->status, 204) << removed->body;
+    };
+
+    run_session();
+    const auto baseline = process_status();
+    const auto baseline_heap = *live_heap_bytes();
+    running_heaps.clear();
+    constexpr int kSessions = 20;
+    for (int index = 0; index < kSessions; ++index) {
+        run_session();
+    }
+
+    // a run's threads are joined when its session is deleted; a thread still exiting leaves the count within the five
+    // seconds below
+    auto after = process_status();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (after.threads != baseline.threads && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        after = process_status();
+    }
+    EXPECT_EQ(after.threads, baseline.threads);
+
+    ASSERT_FALSE(running_heaps.empty());
+    const auto session_heap = std::ranges::min(running_heaps);
+    if (session_heap == 0U) {
+        GTEST_SKIP() << "the heap count does not see this allocator";
+    }
+    const auto after_heap = *live_heap_bytes();
+    const auto heap_left = after_heap > baseline_heap ? after_heap - baseline_heap : 0U;
+    EXPECT_LT(heap_left, session_heap) << "live heap " << baseline_heap << " bytes before, " << after_heap
+                                       << " bytes after " << kSessions << " sessions; one running session took "
+                                       << session_heap << " bytes";
+    const double growth_per_session = (after.resident_mb - baseline.resident_mb) / kSessions;
+    std::printf("live heap %.2f MB before, %.2f MB after %d sessions, %.2f MB for one running session; "
+                "resident %.1f MB before, %.1f MB after (%.2f MB per session); threads %d before, %d after\n",
+                static_cast<double>(baseline_heap) / 1048576.0,
+                static_cast<double>(after_heap) / 1048576.0,
+                kSessions,
+                static_cast<double>(session_heap) / 1048576.0,
+                baseline.resident_mb,
+                after.resident_mb,
+                growth_per_session,
+                baseline.threads,
+                after.threads);
 }
 
 TEST_F(HttpApiTest, GetBlocksSuccess) {

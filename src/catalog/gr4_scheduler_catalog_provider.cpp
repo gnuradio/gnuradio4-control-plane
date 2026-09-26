@@ -6,8 +6,8 @@
 #include <vector>
 
 #include <gnuradio-4.0/PluginLoader.hpp>
-#include <gnuradio-4.0/Scheduler.hpp>
 
+#include "gr4cp/runtime/gr4_runtime_manager.hpp"
 #include "gr4cp/runtime/plugin_loader.hpp"
 
 namespace gr4cp::catalog {
@@ -16,12 +16,6 @@ namespace {
 
 bool is_alias_scheduler_id(const std::string& id) {
     return id.find('<') == std::string::npos;
-}
-
-void register_default_schedulers() {
-    auto& registry = gr::globalSchedulerRegistry();
-    (void)registry.insert<gr::scheduler::Simple<gr::scheduler::ExecutionPolicy::singleThreaded>>("=gr::scheduler::SimpleSingle");
-    (void)registry.insert<gr::scheduler::Simple<gr::scheduler::ExecutionPolicy::multiThreaded>>("=gr::scheduler::SimpleMulti");
 }
 
 void throw_on_failed_plugins(const gr::PluginLoader& loader) {
@@ -35,9 +29,11 @@ void throw_on_failed_plugins(const gr::PluginLoader& loader) {
 
 Gr4SchedulerCatalogProvider::Gr4SchedulerCatalogProvider(std::shared_ptr<gr::PluginLoader> loader) : loader_(std::move(loader)) {}
 
+// The loader's schedulers that carry no template arguments, the package's aliases among them. The listing registers
+// the aliases into the global scheduler registry, where a document's nested scheduler finds them.
 std::vector<domain::SchedulerDescriptor> Gr4SchedulerCatalogProvider::list() const {
     throw_on_failed_plugins(*loader_);
-    register_default_schedulers();
+    runtime::register_scheduler_aliases();
 
     auto scheduler_ids = loader_->availableSchedulers();
     std::erase_if(scheduler_ids, [](const auto& id) { return !is_alias_scheduler_id(id); });

@@ -30,7 +30,7 @@ struct ControlPlane {
     gr4cp::runtime::Gr4RuntimeManager runtime_manager{loader};
     gr4cp::app::SessionService session_service{repository, runtime_manager};
     gr4cp::app::SessionStreamService session_stream_service;
-    gr4cp::app::BlockSettingsService block_settings_service{repository, runtime_manager};
+    gr4cp::app::BlockSettingsService block_settings_service{session_service, runtime_manager};
     gr4cp::catalog::Gr4BlockCatalogProvider block_catalog_provider{loader};
     gr4cp::app::BlockCatalogService block_catalog_service{block_catalog_provider};
     gr4cp::catalog::Gr4SchedulerCatalogProvider scheduler_catalog_provider{loader};
