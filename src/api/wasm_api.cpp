@@ -324,8 +324,6 @@ WasmResponse current_error_response() {
         return error_response(409, "invalid_state", error.what());
     } catch (const app::RuntimeError& error) {
         return error_response(500, "runtime_error", error.what());
-    } catch (const app::TimeoutError& error) {
-        return error_response(504, "timeout", error.what());
     } catch (const catalog::SchedulerCatalogLoadError& error) {
         return error_response(500, "scheduler_catalog_error", error.what());
     } catch (const catalog::CatalogLoadError& error) {

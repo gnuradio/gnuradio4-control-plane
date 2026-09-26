@@ -25,7 +25,8 @@ public:
     using std::runtime_error::runtime_error;
 };
 
-class ReplyTimeoutError : public std::runtime_error {
+// A block refused a settings patch: a key it does not accept, or a value it does not take. Nothing was staged.
+class SettingsRefusedError : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
 };

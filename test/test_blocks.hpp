@@ -7,10 +7,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <complex>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace gr4cp::test {
 
@@ -117,6 +119,26 @@ private:
     LiveInstances live_;
 };
 
+// Produces zeros until the run stops, and holds the settings `gains` (float list), `antennas` (string list),
+// `correction` (complex) and `taps` (complex list).
+struct VectorSettingsSource : gr::Block<VectorSettingsSource> {
+    gr::PortOut<float> out;
+    std::vector<float> gains{1.0F, 2.0F};
+    std::vector<std::string> antennas{"RX", "TX"};
+    std::complex<float> correction{1.0F, -0.5F};
+    std::vector<std::complex<float>> taps{{1.0F, 0.0F}};
+
+    GR_MAKE_REFLECTABLE(VectorSettingsSource, out, gains, antennas, correction, taps);
+
+    explicit VectorSettingsSource(gr::property_map init = {}) : gr::Block<VectorSettingsSource>(std::move(init)) {}
+
+    gr::work::Status processBulk(gr::OutputSpanLike auto& outSpan) {
+        std::ranges::fill(outSpan, 0.0F);
+        outSpan.publish(outSpan.size());
+        return gr::work::Status::OK;
+    }
+};
+
 // Registers the blocks above into the global registry once, each under `gr4cp::test::<name>`.
 inline void register_test_blocks() {
     static const bool registered = [] {
@@ -125,7 +147,8 @@ inline void register_test_blocks() {
                registry.insert<FaultReportingSource>("=gr4cp::test::FaultReportingSource") &&
                registry.insert<FailingSource>("=gr4cp::test::FailingSource") &&
                registry.insert<StreamEndpointSink>("=gr4cp::test::StreamEndpointSink") &&
-               registry.insert<CountedSource>("=gr4cp::test::CountedSource");
+               registry.insert<CountedSource>("=gr4cp::test::CountedSource") &&
+               registry.insert<VectorSettingsSource>("=gr4cp::test::VectorSettingsSource");
     }();
     ASSERT_TRUE(registered);
 }
