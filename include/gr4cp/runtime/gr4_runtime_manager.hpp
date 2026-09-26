@@ -4,7 +4,6 @@
 #include "gr4cp/runtime/stream_binding_allocator.hpp"
 
 #include <cstdint>
-#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -12,11 +11,15 @@
 #include <unordered_map>
 #include <vector>
 
+namespace gr {
+class PluginLoader;
+}
+
 namespace gr4cp::runtime {
 
 class Gr4RuntimeManager final : public RuntimeManager {
 public:
-    explicit Gr4RuntimeManager(std::vector<std::filesystem::path> plugin_directories = {});
+    explicit Gr4RuntimeManager(std::shared_ptr<gr::PluginLoader> loader);
     ~Gr4RuntimeManager() override;
 
     void prepare(const domain::Session& session) override;
@@ -43,8 +46,6 @@ private:
     };
     struct SessionRuntimeResources;
 
-    static std::vector<std::filesystem::path> default_plugin_directories();
-
     std::shared_ptr<SessionRuntimeResources> get_or_create_resources(const domain::Session& session);
     std::shared_ptr<SessionRuntimeResources> find_resources(const std::string& session_id);
     Execution& prepare_locked(const domain::Session& session, SessionRuntimeResources& resources);
@@ -53,7 +54,7 @@ private:
                      SessionRuntimeResources& resources,
                      std::unique_lock<std::mutex>& lock);
 
-    std::vector<std::filesystem::path> plugin_directories_;
+    std::shared_ptr<gr::PluginLoader> loader_;
     StreamBindingAllocator stream_allocator_;
     std::unordered_map<std::string, std::shared_ptr<SessionRuntimeResources>> resources_;
     std::mutex resources_mutex_;

@@ -33,6 +33,7 @@
 #include "gr4cp/runtime/runtime_manager.hpp"
 #include "gr4cp/runtime/stream_binding_allocator.hpp"
 #include "gr4cp/storage/in_memory_session_repository.hpp"
+#include "test_plugin_loader.hpp"
 
 namespace {
 
@@ -50,7 +51,7 @@ constexpr std::string_view kSpectrumPayloadFormat = "dataset-xy-json-v1";
 constexpr std::string_view kMatrixPayloadFormat = "waterfall-spectrum-json-v1";
 
 bool block_is_registered(std::string_view block_id) {
-    const auto available = gr::globalPluginLoader().availableBlocks();
+    const auto available = gr4cp::test::plugin_loader()->availableBlocks();
     return std::ranges::any_of(available, [block_id](const auto& name) { return name == block_id; });
 }
 
@@ -883,7 +884,7 @@ protected:
 
     std::unique_ptr<gr4cp::api::HttpServer> server;
     gr4cp::storage::InMemorySessionRepository repository;
-    gr4cp::runtime::Gr4RuntimeManager runtime_manager;
+    gr4cp::runtime::Gr4RuntimeManager runtime_manager{gr4cp::test::plugin_loader()};
     TestBlockCatalogProvider block_catalog_provider;
     TestSchedulerCatalogProvider scheduler_catalog_provider;
     gr4cp::app::SessionService service{repository, runtime_manager};

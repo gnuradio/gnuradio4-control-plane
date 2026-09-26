@@ -1,7 +1,13 @@
 #include "gr4cp/api/http_server.hpp"
 
+#include <sys/wait.h>
+
+#include <array>
 #include <chrono>
+#include <cstdio>
+#include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -18,6 +24,22 @@
 #include "gr4cp/storage/in_memory_session_repository.hpp"
 
 namespace {
+
+// Runs the server executable with `arguments` and returns its exit status and standard output.
+std::pair<int, std::string> run_server(const std::string& arguments) {
+    const std::string command = std::string(GR4CP_SERVER_EXECUTABLE) + " " + arguments + " 2>/dev/null";
+    FILE* pipe = popen(command.c_str(), "r");
+    if (pipe == nullptr) {
+        return {-1, "failed to launch the server"};
+    }
+    std::string output;
+    std::array<char, 256> buffer{};
+    while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
+        output += buffer.data();
+    }
+    const int status = pclose(pipe);
+    return {WIFEXITED(status) ? WEXITSTATUS(status) : -1, output};
+}
 
 class EmptyBlockCatalogProvider final : public gr4cp::catalog::BlockCatalogProvider {
 public:
@@ -66,6 +88,20 @@ TEST(HealthzSmokeTest, ReturnsOkJson) {
     if (server_thread.joinable()) {
         server_thread.join();
     }
+}
+
+TEST(ServerExecutableTest, HelpPrintsUsageAndExitsZero) {
+    const auto [status, output] = run_server("--help");
+    EXPECT_EQ(status, 0) << output;
+    EXPECT_TRUE(output.starts_with("Usage: gr4cp_server [--help]")) << output;
+    EXPECT_NE(output.find("GR4CP_PORT"), std::string::npos) << output;
+    EXPECT_NE(output.find("GNURADIO4_PLUGIN_DIRECTORIES"), std::string::npos) << output;
+}
+
+TEST(ServerExecutableTest, UnknownArgumentExitsWithUsageError) {
+    const auto [status, output] = run_server("--no-such-option");
+    EXPECT_EQ(status, 2) << output;
+    EXPECT_TRUE(output.empty()) << output;
 }
 
 }  // namespace

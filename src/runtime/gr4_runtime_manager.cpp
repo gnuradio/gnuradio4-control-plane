@@ -20,10 +20,6 @@
 #include <utility>
 #include <vector>
 
-#if defined(__unix__) || defined(__APPLE__)
-#include <dlfcn.h>
-#endif
-
 #include <gnuradio-4.0/Graph_yaml_importer.hpp>
 #include <gnuradio-4.0/Graph.hpp>
 #include <gnuradio-4.0/Message.hpp>
@@ -60,23 +56,6 @@ std::string connection_error_message(const TResult& result) {
     }
 }
 
-std::vector<std::filesystem::path> split_plugin_directories(std::string_view paths) {
-    std::vector<std::filesystem::path> directories;
-    std::size_t start = 0;
-    while (start <= paths.size()) {
-        const auto end = paths.find(':', start);
-        const auto token = paths.substr(start, end == std::string_view::npos ? paths.size() - start : end - start);
-        if (!token.empty()) {
-            directories.emplace_back(token);
-        }
-        if (end == std::string_view::npos) {
-            break;
-        }
-        start = end + 1;
-    }
-    return directories;
-}
-
 bool stream_debug_enabled() {
     if (const char* env = std::getenv("GR4CP_STREAM_DEBUG"); env != nullptr) {
         return *env != '\0' && std::string_view(env) != "0";
@@ -91,185 +70,6 @@ void stream_debug(std::string_view message) {
     std::clog << "[gr4cp stream] " << message << '\n';
 }
 
-void prepend_library_search_path(const std::vector<std::filesystem::path>& plugin_directories) {
-#if !defined(_WIN32)
-    std::string value;
-    for (const auto& directory : plugin_directories) {
-        if (!value.empty()) {
-            value += ":";
-        }
-        value += directory.string();
-    }
-    if (const char* existing = std::getenv("LD_LIBRARY_PATH"); existing != nullptr && *existing != '\0') {
-        if (!value.empty()) {
-            value += ":";
-        }
-        value += existing;
-    }
-    if (!value.empty()) {
-        ::setenv("LD_LIBRARY_PATH", value.c_str(), 1);
-    }
-#else
-    (void)plugin_directories;
-#endif
-}
-
-void configure_plugin_environment(const std::vector<std::filesystem::path>& plugin_directories) {
-    std::string value;
-    for (const auto& directory : plugin_directories) {
-        if (!value.empty()) {
-            value += ":";
-        }
-        value += directory.string();
-    }
-    if (!value.empty()) {
-        ::setenv("GNURADIO4_PLUGIN_DIRECTORIES", value.c_str(), 1);
-    }
-    prepend_library_search_path(plugin_directories);
-}
-
-bool is_shared_library(const std::filesystem::path& path) {
-#if defined(__APPLE__)
-    constexpr auto extension = ".dylib";
-#elif defined(_WIN32)
-    constexpr auto extension = ".dll";
-#else
-    constexpr auto extension = ".so";
-#endif
-    return path.extension() == extension;
-}
-
-bool is_shared_block_library(const std::filesystem::path& path) {
-    return is_shared_library(path) && path.filename().string().find("Shared") != std::string::npos;
-}
-
-void preload_support_libraries(const std::vector<std::filesystem::path>& plugin_directories) {
-#if defined(__unix__) || defined(__APPLE__)
-    static std::vector<void*> handles;
-    static std::set<std::string> loaded_libraries;
-
-    auto should_preload = [](const std::filesystem::path& path) {
-        const auto name = path.filename().string();
-        return name == "libgnuradio-blocklib-core.so" || name == "libgnuradio-plugin.so";
-    };
-
-    for (const auto& directory : plugin_directories) {
-        if (!std::filesystem::is_directory(directory)) {
-            continue;
-        }
-        for (const auto& entry : std::filesystem::directory_iterator(directory)) {
-            if (!entry.is_regular_file() || !should_preload(entry.path())) {
-                continue;
-            }
-            const auto library = entry.path().string();
-            if (!loaded_libraries.insert(library).second) {
-                continue;
-            }
-            void* handle = ::dlopen(library.c_str(), RTLD_NOW | RTLD_GLOBAL);
-            if (handle == nullptr) {
-                loaded_libraries.erase(library);
-                const char* error = ::dlerror();
-                throw std::runtime_error("failed to preload GNU Radio 4 support library " + library +
-                                         (error != nullptr ? ": " + std::string(error) : ""));
-            }
-            handles.push_back(handle);
-        }
-    }
-#else
-    (void)plugin_directories;
-#endif
-}
-
-std::string module_name_from_library(const std::filesystem::path& path) {
-    std::string name = path.filename().string();
-    if (name.rfind("lib", 0) == 0) {
-        name = name.substr(3);
-    }
-    if (name.ends_with(".so")) {
-        name.resize(name.size() - 3);
-    } else if (name.ends_with(".dylib")) {
-        name.resize(name.size() - 6);
-    }
-    if (name.ends_with("Shared")) {
-        name.resize(name.size() - 6);
-    }
-    return name;
-}
-
-void bootstrap_shared_block_libraries(const std::vector<std::filesystem::path>& plugin_directories) {
-#if defined(__unix__) || defined(__APPLE__)
-    static std::vector<void*> handles;
-    static std::set<std::string> retained;
-
-    using init_fn_t = std::size_t (*)(gr::BlockRegistry&);
-
-    for (const auto& directory : plugin_directories) {
-        if (!std::filesystem::is_directory(directory)) {
-            continue;
-        }
-        for (const auto& entry : std::filesystem::directory_iterator(directory)) {
-            if (!entry.is_regular_file() || !is_shared_block_library(entry.path())) {
-                continue;
-            }
-
-            const auto library_string = entry.path().string();
-            if (!retained.insert(library_string).second) {
-                continue;
-            }
-
-            void* handle = ::dlopen(library_string.c_str(), RTLD_NOW | RTLD_GLOBAL);
-            if (handle == nullptr) {
-                retained.erase(library_string);
-                const char* error = ::dlerror();
-                throw std::runtime_error("failed to load GNU Radio 4 shared block library " + library_string +
-                                         (error != nullptr ? ": " + std::string(error) : ""));
-            }
-
-            const auto symbol_name = std::string("gr_blocklib_init_module_") + module_name_from_library(entry.path());
-            auto* init_fn = reinterpret_cast<init_fn_t>(::dlsym(handle, symbol_name.c_str()));
-            if (init_fn == nullptr) {
-                handles.push_back(handle);
-                continue;
-            }
-
-            try {
-                (void)init_fn(gr::globalBlockRegistry());
-            } catch (const std::exception& error) {
-                throw std::runtime_error("failed to initialize GNU Radio 4 shared block library " + library_string +
-                                         ": " + error.what());
-            }
-            handles.push_back(handle);
-        }
-    }
-#else
-    (void)plugin_directories;
-#endif
-}
-
-void ensure_runtime_environment(const std::vector<std::filesystem::path>& plugin_directories) {
-    static std::once_flag once;
-    static std::optional<std::string> bootstrap_error;
-
-    std::call_once(once, [&]() {
-        try {
-            if (plugin_directories.empty()) {
-                throw std::runtime_error("no GNU Radio 4 plugin directories are configured");
-            }
-            configure_plugin_environment(plugin_directories);
-            preload_support_libraries(plugin_directories);
-            bootstrap_shared_block_libraries(plugin_directories);
-            auto& loader = gr::globalPluginLoader();
-            (void)loader.availableBlocks();
-        } catch (const std::exception& error) {
-            bootstrap_error = error.what();
-        }
-    });
-
-    if (bootstrap_error.has_value()) {
-        throw std::runtime_error("GNU Radio 4 runtime initialization failed: " + *bootstrap_error);
-    }
-}
-
 std::runtime_error runtime_error(const domain::Session& session, std::string_view phase, const std::string& detail) {
     return std::runtime_error(std::format("session {} {} failed: {}", session.id, phase, detail));
 }
@@ -280,11 +80,10 @@ void register_default_schedulers() {
     (void)registry.insert<gr::scheduler::Simple<gr::scheduler::ExecutionPolicy::multiThreaded>>("=gr::scheduler::SimpleMulti");
 }
 
-std::string default_scheduler_alias() {
+std::string default_scheduler_alias(const gr::PluginLoader& loader) {
     register_default_schedulers();
 
-    auto available = gr::globalPluginLoader().availableSchedulers();
-    std::ranges::sort(available);
+    const auto available = loader.availableSchedulers();
 
     for (const auto preferred : {
              std::string_view{"gr::incubator::scheduler::BlockingBackoff"},
@@ -682,8 +481,7 @@ struct Gr4RuntimeManager::SessionRuntimeResources {
     std::mutex mutex;
 };
 
-Gr4RuntimeManager::Gr4RuntimeManager(std::vector<std::filesystem::path> plugin_directories)
-    : plugin_directories_(plugin_directories.empty() ? default_plugin_directories() : std::move(plugin_directories)) {}
+Gr4RuntimeManager::Gr4RuntimeManager(std::shared_ptr<gr::PluginLoader> loader) : loader_(std::move(loader)) {}
 
 Gr4RuntimeManager::~Gr4RuntimeManager() {
     std::vector<std::shared_ptr<SessionRuntimeResources>> resources;
@@ -709,17 +507,6 @@ Gr4RuntimeManager::~Gr4RuntimeManager() {
         }
 
     }
-}
-
-std::vector<std::filesystem::path> Gr4RuntimeManager::default_plugin_directories() {
-    if (const char* env = std::getenv("GNURADIO4_PLUGIN_DIRECTORIES"); env != nullptr && *env != '\0') {
-        return split_plugin_directories(env);
-    }
-#if defined(GR4CP_DEFAULT_GNURADIO4_PLUGIN_DIR)
-    return split_plugin_directories(GR4CP_DEFAULT_GNURADIO4_PLUGIN_DIR);
-#else
-    return {};
-#endif
 }
 
 void Gr4RuntimeManager::prepare(const domain::Session& session) {
@@ -996,8 +783,6 @@ Gr4RuntimeManager::Execution& Gr4RuntimeManager::prepare_locked(const domain::Se
         throw runtime_error(session, "prepare", *contract_error);
     }
 
-    ensure_runtime_environment(plugin_directories_);
-
     release_stream_bindings_locked(resources);
     std::vector<domain::RuntimeStreamBinding> stream_bindings;
     if (const auto plan = domain::derive_stream_runtime_plan(session); plan.has_value()) {
@@ -1022,9 +807,9 @@ Gr4RuntimeManager::Execution& Gr4RuntimeManager::prepare_locked(const domain::Se
 
     auto execution = std::make_unique<Execution>();
     try {
-        auto graph = gr::loadGrc(gr::globalPluginLoader(), normalize_graph_content(session.grc_content, stream_bindings));
-        const auto scheduler_alias = session.scheduler_alias.value_or(default_scheduler_alias());
-        execution->scheduler = gr::globalPluginLoader().instantiateScheduler(scheduler_alias);
+        auto graph = gr::loadGrc(*loader_, normalize_graph_content(session.grc_content, stream_bindings));
+        const auto scheduler_alias = session.scheduler_alias.value_or(default_scheduler_alias(*loader_));
+        execution->scheduler = loader_->instantiateScheduler(scheduler_alias);
         if (!execution->scheduler) {
             throw runtime_error(session, "prepare", "scheduler not found: " + scheduler_alias);
         }

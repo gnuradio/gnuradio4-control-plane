@@ -1,17 +1,28 @@
+#include "gr4cp/catalog/gr4_block_catalog_provider.hpp"
+#include "gr4cp/catalog/gr4_scheduler_catalog_provider.hpp"
 #include "gr4cp/domain/session.hpp"
 #include "gr4cp/runtime/gr4_runtime_manager.hpp"
+#include "gr4cp/runtime/plugin_loader.hpp"
+#include "test_plugin_loader.hpp"
 
+#include <gnuradio-4.0/BlockRegistry.hpp>
 #include <gnuradio-4.0/PluginLoader.hpp>
 
 #include <gtest/gtest.h>
 
+#include <unistd.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
+#include <filesystem>
 #include <format>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -20,8 +31,46 @@ using namespace std::chrono_literals;
 constexpr std::string_view kStudioSeriesSinkId = "gr::studio::StudioSeriesSink<float32>";
 constexpr std::string_view kStudioWaterfallSinkId = "gr::studio::StudioWaterfallSink<float32>";
 
+std::vector<std::string> process_environment() {
+    std::vector<std::string> entries;
+    for (char** entry = environ; *entry != nullptr; ++entry) {
+        entries.emplace_back(*entry);
+    }
+    std::ranges::sort(entries);
+    return entries;
+}
+
+// The environment as the process started with it, before any case or the test loader ran.
+const std::vector<std::string> kEnvironmentAtStart = process_environment();
+
+// Sets or unsets one environment variable for a scope and restores it after.
+class ScopedVariable {
+public:
+    ScopedVariable(std::string name, std::optional<std::string> value) : name_(std::move(name)) {
+        if (const char* existing = std::getenv(name_.c_str()); existing != nullptr) {
+            saved_ = existing;
+        }
+        set(value);
+    }
+    ~ScopedVariable() { set(saved_); }
+    ScopedVariable(const ScopedVariable&) = delete;
+    ScopedVariable& operator=(const ScopedVariable&) = delete;
+
+private:
+    void set(const std::optional<std::string>& value) {
+        if (value.has_value()) {
+            ::setenv(name_.c_str(), value->c_str(), 1);
+        } else {
+            ::unsetenv(name_.c_str());
+        }
+    }
+
+    std::string name_;
+    std::optional<std::string> saved_;
+};
+
 bool block_is_registered(std::string_view block_id) {
-    const auto available = gr::globalPluginLoader().availableBlocks();
+    const auto available = gr4cp::test::plugin_loader()->availableBlocks();
     return std::ranges::any_of(available, [block_id](const auto& name) { return name == block_id; });
 }
 
@@ -167,7 +216,7 @@ protected:
         }
     }
 
-    gr4cp::runtime::Gr4RuntimeManager runtime_;
+    gr4cp::runtime::Gr4RuntimeManager runtime_{gr4cp::test::plugin_loader()};
     gr4cp::domain::Session probe_session_;
 };
 
@@ -410,6 +459,115 @@ TEST_F(Gr4RuntimeManagerTest, CompatibilityStudioWaterfallSinkHttpStreamCanBeFet
 
     runtime_.stop(session);
     runtime_.destroy(session);
+}
+
+TEST_F(Gr4RuntimeManagerTest, PluginDirectoriesComeFromTheEnvironmentThenTheDefault) {
+    {
+        const ScopedVariable variable("GNURADIO4_PLUGIN_DIRECTORIES", "/env/one:/env/two:/default/one");
+        EXPECT_EQ(gr4cp::runtime::plugin_directories("/default/one:/default/two"),
+                  (std::vector<std::string>{"/env/one", "/env/two", "/default/one", "/default/two"}));
+    }
+    {
+        const ScopedVariable variable("GNURADIO4_PLUGIN_DIRECTORIES", std::nullopt);
+        EXPECT_EQ(gr4cp::runtime::plugin_directories("/default/one:/default/two"),
+                  (std::vector<std::string>{"/default/one", "/default/two"}));
+    }
+}
+
+// Each directory list loads into registries of its own. The blocks this process registered before do not count.
+TEST(PluginLoaderTest, StartupRefusesAMissingAnUnreadableAndAnEmptyDirectory) {
+    const auto root = std::filesystem::temp_directory_path() / std::format("gr4cp-plugin-directories-{}", ::getpid());
+    const auto missing = (root / "missing").string();
+    const auto unreadable = (root / "unreadable").string();
+    const auto empty = (root / "empty").string();
+    std::filesystem::create_directories(unreadable);
+    std::filesystem::create_directories(empty);
+    std::filesystem::permissions(unreadable, std::filesystem::perms::none);
+
+    const auto refusal = [](std::vector<std::string> directories) {
+        gr::BlockRegistry blocks;
+        gr::SchedulerRegistry schedulers;
+        try {
+            (void)gr4cp::runtime::load_plugins(directories, blocks, schedulers);
+        } catch (const gr4cp::runtime::PluginLoadError& error) {
+            return std::string(error.what());
+        }
+        return std::string("<accepted>");
+    };
+    const auto missing_refusal = refusal({missing});
+    const auto unreadable_refusal = refusal({unreadable, empty});
+    const auto empty_refusal = refusal({missing, empty});
+
+    std::filesystem::permissions(unreadable, std::filesystem::perms::owner_all);
+    std::filesystem::remove_all(root);
+
+    EXPECT_NE(missing_refusal.find("no GNU Radio 4 plugin directory exists: " + missing), std::string::npos) << missing_refusal;
+    EXPECT_NE(unreadable_refusal.find("cannot read GNU Radio 4 plugin directory (" + unreadable), std::string::npos)
+        << unreadable_refusal;
+    EXPECT_NE(empty_refusal.find("found no registered blocks"), std::string::npos) << empty_refusal;
+}
+
+// A directory that holds a shared object which is neither a plugin nor a block library stops startup, and the one line
+// names the directory, the file and the loader's reason.
+TEST(PluginLoaderTest, StartupRefusalNamesTheDirectoryAndTheLibraryThatFailed) {
+    const auto directory = std::filesystem::temp_directory_path() / std::format("gr4cp-library-directory-{}", ::getpid());
+    std::filesystem::create_directories(directory);
+    std::filesystem::copy_file(GR4CP_NOT_A_PLUGIN_LIBRARY, directory / "libnot-a-plugin.so");
+
+    std::string refusal = "<accepted>";
+    {
+        gr::BlockRegistry blocks;
+        gr::SchedulerRegistry schedulers;
+        const std::vector<std::string> directories{directory.string()};
+        try {
+            (void)gr4cp::runtime::load_plugins(directories, blocks, schedulers);
+        } catch (const gr4cp::runtime::PluginLoadError& error) {
+            refusal = error.what();
+        }
+    }
+    std::filesystem::remove_all(directory);
+
+    EXPECT_NE(refusal.find("plugin directory " + directory.string() + " holds libnot-a-plugin.so"), std::string::npos)
+        << refusal;
+    EXPECT_NE(refusal.find("gr_plugin_make"), std::string::npos) << refusal;
+    EXPECT_EQ(refusal.find('\n'), std::string::npos) << refusal;
+}
+
+TEST_F(Gr4RuntimeManagerTest, ProcessEnvironmentIsLeftUnchanged) {
+    gr4cp::catalog::Gr4SchedulerCatalogProvider schedulers(gr4cp::test::plugin_loader());
+    EXPECT_FALSE(schedulers.list().empty());
+
+    auto session = make_session("runtime_environment", continuous_graph_yaml());
+    runtime_.prepare(session);
+    runtime_.start(session);
+    std::this_thread::sleep_for(100ms);
+    runtime_.stop(session);
+    runtime_.destroy(session);
+
+    EXPECT_EQ(process_environment(), kEnvironmentAtStart);
+}
+
+TEST_F(Gr4RuntimeManagerTest, NoStagingDirectoryIsCreated) {
+    const auto temporary = std::filesystem::temp_directory_path() / std::format("gr4cp-staging-check-{}", ::getpid());
+    std::filesystem::create_directories(temporary);
+    {
+        const ScopedVariable variable("TMPDIR", temporary.string());
+        gr4cp::catalog::Gr4BlockCatalogProvider blocks(gr4cp::test::plugin_loader());
+        EXPECT_FALSE(blocks.list().empty());
+        gr4cp::catalog::Gr4SchedulerCatalogProvider schedulers(gr4cp::test::plugin_loader());
+        EXPECT_FALSE(schedulers.list().empty());
+
+        auto session = make_session("runtime_staging", continuous_graph_yaml());
+        runtime_.prepare(session);
+        runtime_.start(session);
+        std::this_thread::sleep_for(100ms);
+        runtime_.stop(session);
+        runtime_.destroy(session);
+
+        EXPECT_EQ(std::filesystem::temp_directory_path(), temporary);
+    }
+    EXPECT_TRUE(std::filesystem::is_empty(temporary));
+    std::filesystem::remove_all(temporary);
 }
 
 }  // namespace
