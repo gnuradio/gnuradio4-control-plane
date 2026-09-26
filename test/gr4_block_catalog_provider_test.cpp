@@ -8,6 +8,7 @@
 
 #include "gr4cp/catalog/gr4_block_catalog_provider.hpp"
 #include "gr4cp/catalog/gr4_block_catalog_provider_detail.hpp"
+#include "test_plugin_loader.hpp"
 
 namespace {
 
@@ -49,7 +50,7 @@ TEST(Gr4BlockCatalogProviderTest, TooShortIdsFallbackToUncategorized) {
 }
 
 TEST(Gr4BlockCatalogProviderTest, ListLoadsCatalogFromGNUradio4) {
-    gr4cp::catalog::Gr4BlockCatalogProvider provider;
+    gr4cp::catalog::Gr4BlockCatalogProvider provider(gr4cp::test::plugin_loader());
 
     std::vector<gr4cp::domain::BlockDescriptor> blocks;
     try {
@@ -65,7 +66,7 @@ TEST(Gr4BlockCatalogProviderTest, ListLoadsCatalogFromGNUradio4) {
 }
 
 TEST(Gr4BlockCatalogProviderTest, CatalogContainsStableBlockShape) {
-    gr4cp::catalog::Gr4BlockCatalogProvider provider;
+    gr4cp::catalog::Gr4BlockCatalogProvider provider(gr4cp::test::plugin_loader());
 
     std::vector<gr4cp::domain::BlockDescriptor> blocks;
     try {
@@ -84,7 +85,7 @@ TEST(Gr4BlockCatalogProviderTest, CatalogContainsStableBlockShape) {
 }
 
 TEST(Gr4BlockCatalogProviderTest, ProviderUsesNamespacePathFallbackCategoryWhenNoExplicitMetadataExists) {
-    gr4cp::catalog::Gr4BlockCatalogProvider provider;
+    gr4cp::catalog::Gr4BlockCatalogProvider provider(gr4cp::test::plugin_loader());
 
     std::vector<gr4cp::domain::BlockDescriptor> blocks;
     try {
@@ -101,7 +102,7 @@ TEST(Gr4BlockCatalogProviderTest, ProviderUsesNamespacePathFallbackCategoryWhenN
 }
 
 TEST(Gr4BlockCatalogProviderTest, BlockDetailsIncludeBuiltinParametersAndExtendedMetadata) {
-    gr4cp::catalog::Gr4BlockCatalogProvider provider;
+    gr4cp::catalog::Gr4BlockCatalogProvider provider(gr4cp::test::plugin_loader());
 
     std::vector<gr4cp::domain::BlockDescriptor> blocks;
     try {
@@ -180,7 +181,7 @@ TEST(Gr4BlockCatalogProviderTest, BlockDetailsIncludeBuiltinParametersAndExtende
 }
 
 TEST(Gr4BlockCatalogProviderTest, DynamicPortCollectionsExposeCollectionMetadata) {
-    gr4cp::catalog::Gr4BlockCatalogProvider provider;
+    gr4cp::catalog::Gr4BlockCatalogProvider provider(gr4cp::test::plugin_loader());
 
     std::vector<gr4cp::domain::BlockDescriptor> blocks;
     try {
