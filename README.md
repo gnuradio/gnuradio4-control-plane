@@ -35,7 +35,7 @@ The service is not a multi-tenant platform, graph editor, diagnostics system, pl
 - Zlib
 - pkg-config
 
-The production block catalog is GNU Radio 4-backed only. With the default `GR4CP_ENABLE_GR4_CATALOG=ON`, configuration requires a working `gnuradio4` package. Server startup also validates GNU Radio 4 plugin loading and catalog reflection before accepting requests. If initialization fails, the server exits instead of serving placeholder catalog data.
+The production block catalog is GNU Radio 4-backed only. With the default `GR4CP_ENABLE_GR4_CATALOG=ON`, configuration requires a working `gnuradio4` package. Server startup loads the plugins once, before it accepts requests. It searches the directories of `GNURADIO4_PLUGIN_DIRECTORIES`, then the installation's plugin directory, `gr::installedPluginDirectory()`. Two build options below replace or extend the installation's directory. The server exits with one line when no directory exists, a directory cannot be read, a plugin fails to load, no block is registered, or catalog reflection fails. It does not serve placeholder catalog data. A plugin directory holds plugins and block libraries, and it may hold other shared libraries. Startup passes over a shared object that loads, has no plugin entry point and registers nothing, such as a core library. `GNURADIO4_PLUGIN_DIRECTORIES` may therefore name a library directory such as `<prefix>/lib`. Any other shared object there that fails to load stops startup: a plugin or block library the loader refuses, or a file the dynamic linker cannot open. The line names the directory, the file and the loader's reason.
 
 ## Build And Test
 
@@ -57,8 +57,8 @@ Useful build options:
 
 - `GR4CP_ENABLE_GR4_CATALOG=ON`: require the GNU Radio 4-backed catalog provider, enabled by default
 - `GR4CP_SUPPRESS_IMPORTED_WERROR=ON`: strip inherited `-Werror` from imported GNU Radio 4 targets when needed
-- `GR4CP_EXTRA_PLUGIN_DIRECTORIES=<dir>[:<dir>...]`: plugin directories searched in addition to the ones under the gnuradio4 prefix
-- `GR4CP_PLUGIN_DIRECTORIES=<dir>[:<dir>...]`: plugin directories that replace the ones derived from the gnuradio4 prefix
+- `GR4CP_EXTRA_PLUGIN_DIRECTORIES=<dir>[:<dir>...]`: plugin directories searched in addition to the installation's plugin directory
+- `GR4CP_PLUGIN_DIRECTORIES=<dir>[:<dir>...]`: plugin directories that replace the installation's plugin directory
 - `USE_CCACHE=ON`: use ccache when available, enabled by default
 
 Built executables:
@@ -97,6 +97,10 @@ GR4CP_PORT=0 GR4CP_PORT_FILE=/tmp/gr4cp.port ./build/gr4cp_server
 ```
 
 `GR4CP_PORT_FILE` is only used when `GR4CP_PORT=0`.
+
+`./build/gr4cp_server --help` prints the environment variables the server reads
+and its plugin directories in search order, and exits without starting. The
+server takes no other argument.
 
 Temporary health check:
 

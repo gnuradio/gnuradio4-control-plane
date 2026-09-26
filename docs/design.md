@@ -136,7 +136,7 @@ The catalog path uses a provider/service boundary:
 
 The production catalog source is GNU Radio 4:
 
-- load plugins through GNU Radio 4 plugin loading
+- load plugins once at startup through one GNU Radio 4 plugin loader, from `GNURADIO4_PLUGIN_DIRECTORIES` and then the installation's plugin directory; a shared object in a searched directory that loads, has no plugin entry point and registers nothing is passed over, and any other shared object that fails to load stops startup with a line that names the directory and the file
 - enumerate registered block types
 - instantiate block models for reflection
 - translate reflected metadata into stable `BlockDescriptor` values
