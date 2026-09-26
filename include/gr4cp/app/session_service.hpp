@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -60,6 +61,11 @@ private:
     };
 
     InternalLifecyclePhase phase_for_locked(const domain::Session& session);
+    // Updates a running session from its run: the last error a block reported, and the run's end. An ended run goes
+    // to `ended_runs`, which the caller destroys after releasing the mutex.
+    domain::Session observe_locked(domain::Session session, std::vector<std::shared_ptr<void>>& ended_runs);
+    // Reads the session as `get` does, and returns it while its run is in progress.
+    std::optional<domain::Session> running_session(const std::string& id);
     domain::Session load_or_throw(const std::string& id);
     void store_session_locked(const domain::Session& session, InternalLifecyclePhase phase);
     void erase_phase_locked(const std::string& id);

@@ -177,6 +177,8 @@ curl -X DELETE http://127.0.0.1:8080/sessions/<id>
 
 Session responses include `id`, `name`, `state`, `created_at`, `updated_at`, and `last_error`. A running session may also include runtime-derived stream descriptors when the submitted graph contains supported managed stream metadata.
 
+Each read of a running session checks its run. The last error a block reported becomes `last_error`. A graph that finished reads `stopped`, and a graph that failed reads `error` with the run's error. Starting, stopping, restarting or deleting a session whose run already ended succeeds. A stop of a run that failed answers with the session in `error` and the run's error.
+
 ## Runtime Stream Descriptors
 
 When a running session contains supported authored stream-export metadata, session responses may include a `streams` array. This is runtime-derived session metadata, not a separate stream-management API.
@@ -204,11 +206,12 @@ Behavior notes:
 - stored graph content is not rewritten when runtime bindings are derived.
 - authored endpoint values may remain in graph content, but runtime-owned bindings define the active session descriptor when supported stream metadata is present.
 - invalid supported stream metadata fails start or restart explicitly.
+- a stream route of a session whose graph is ending by itself returns a conflict error.
 - sessions without supported stream metadata omit `streams`.
 
 ## Live Block Settings
 
-Live block settings operate only on running sessions. Blocks are addressed by runtime `unique_name`.
+Live block settings operate only on running sessions. A block is addressed by its name, its unique name or its `name` setting, in that order.
 
 Apply a partial settings update:
 
@@ -218,7 +221,7 @@ curl -X POST http://127.0.0.1:8080/sessions/<id>/blocks/src0/settings \
   -d '{"frequency":1250.0,"amplitude":0.5}'
 ```
 
-By default, updates use the staged GR4 settings path. Use `mode=immediate` for the immediate GR4 property endpoint:
+Both modes stage the values on the block, which applies them at its next work call. `applied_via` names the mode, `staged_settings` by default and `settings` for `mode=immediate`:
 
 ```bash
 curl -X POST 'http://127.0.0.1:8080/sessions/<id>/blocks/src0/settings?mode=immediate' \
@@ -256,7 +259,7 @@ Response:
 }
 ```
 
-Stopped or errored sessions return a conflict error for this surface. The service does not fabricate settings from stored GRC content.
+Stopped or errored sessions, and a session whose graph is ending by itself, return a conflict error for this surface. The service does not fabricate settings from stored GRC content.
 
 ## Block Catalog
 

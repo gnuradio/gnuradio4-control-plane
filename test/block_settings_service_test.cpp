@@ -16,7 +16,7 @@ class FakeBlockSettingsRuntimeManager final : public gr4cp::runtime::RuntimeMana
 public:
     void prepare(const gr4cp::domain::Session&) override {}
     void start(const gr4cp::domain::Session&) override {}
-    void stop(const gr4cp::domain::Session&) override {}
+    std::optional<std::string> stop(const gr4cp::domain::Session&) override { return std::nullopt; }
     void destroy(const gr4cp::domain::Session&) override {}
     std::optional<gr4cp::domain::StreamRuntimePlan> active_stream_plan(const gr4cp::domain::Session&) override {
         return std::nullopt;
@@ -55,6 +55,8 @@ public:
         return settings[session.id][block_unique_name];
     }
 
+    gr4cp::runtime::RunObservation observe(const gr4cp::domain::Session&) override { return {}; }
+
     std::string last_session_id;
     std::string last_block;
     gr4cp::runtime::BlockSettingsMode last_mode{gr4cp::runtime::BlockSettingsMode::Staged};
@@ -76,7 +78,7 @@ protected:
     gr4cp::storage::InMemorySessionRepository repository;
     FakeBlockSettingsRuntimeManager runtime;
     gr4cp::app::SessionService service_api{repository, runtime};
-    gr4cp::app::BlockSettingsService service{repository, runtime};
+    gr4cp::app::BlockSettingsService service{service_api, runtime};
 };
 
 TEST_F(BlockSettingsServiceTest, UpdateUsesRuntimePatchAndStagedModeByDefault) {
@@ -127,6 +129,16 @@ TEST_F(BlockSettingsServiceTest, UpdateFailsWhenSessionNotRunning) {
 
     EXPECT_THROW(service.update(session.id, "sig0", nlohmann::json::object(), gr4cp::runtime::BlockSettingsMode::Staged),
                  gr4cp::app::InvalidStateError);
+}
+
+TEST_F(BlockSettingsServiceTest, RunEndingByItselfMapsToInvalidState) {
+    const auto session = create_session(gr4cp::domain::SessionState::Running);
+    runtime.set_exception = std::make_exception_ptr(gr4cp::runtime::SessionNotRunningError("session runtime is not running"));
+    runtime.get_exception = runtime.set_exception;
+
+    EXPECT_THROW(service.update(session.id, "sig0", nlohmann::json::object(), gr4cp::runtime::BlockSettingsMode::Staged),
+                 gr4cp::app::InvalidStateError);
+    EXPECT_THROW(service.get(session.id, "sig0"), gr4cp::app::InvalidStateError);
 }
 
 TEST_F(BlockSettingsServiceTest, RuntimeUnknownBlockMapsToNotFound) {
