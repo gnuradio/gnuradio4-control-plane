@@ -55,9 +55,11 @@ Lifecycle rules:
 
 - `create` validates non-empty GRC content and stores a new stopped session.
 - `start` prepares and starts runtime execution, then marks the session running.
-- `stop` succeeds when already stopped and otherwise stops runtime execution before persisting stopped state.
+- `stop` succeeds when already stopped and otherwise stops runtime execution before persisting stopped state. It also succeeds for a run that ended by itself. A run that ended with an error leaves the session in `error` with the run's error.
 - `restart` performs stop-complete-then-start behavior.
 - `remove` stops a running session before destroying runtime state and deleting the session.
+- `start`, `stop`, `restart` and `remove` read the run first. A run that ended by itself is recorded before the action.
+- every read of a running session observes its run. The last error a block reported becomes `last_error`. A run that ended by itself moves the session to `stopped`, or to `error` with the run's error. The ended run is destroyed after the service releases its lock.
 - runtime failures are recorded on the session as `error` with `last_error`, then surfaced as application errors.
 
 Business rules belong in `SessionService` or the specific application service responsible for the feature. They do not belong in route handlers or the CLI.
@@ -136,7 +138,7 @@ The catalog path uses a provider/service boundary:
 
 The production catalog source is GNU Radio 4:
 
-- load plugins through GNU Radio 4 plugin loading
+- load plugins once at startup through one GNU Radio 4 plugin loader, from `GNURADIO4_PLUGIN_DIRECTORIES` and then the installation's plugin directory; a shared object in a searched directory that is neither a plugin nor a block library stops startup with a line that names the directory and the file
 - enumerate registered block types
 - instantiate block models for reflection
 - translate reflected metadata into stable `BlockDescriptor` values
@@ -155,15 +157,16 @@ Live block settings are the narrow runtime control surface for active graphs:
 Rules:
 
 - settings calls are session-scoped
-- the target block is addressed by runtime `unique_name`
-- the session must be running
-- stopped or errored sessions return conflict errors
+- the target block is addressed by name, unique name or `name` setting, in that order
+- the session must be running; the settings calls read the session as `GET /sessions/{id}` does
+- stopped or errored sessions, and a run that is ending by itself, return conflict errors
+- a name that more than one block carries is refused with the candidates
 - stored GRC content is not inspected to fabricate values
 
-`POST /settings` accepts a JSON object and translates it into GNU Radio 4 runtime settings messages:
+`POST /settings` stages the JSON object's values on the block, which applies them at its next work call. `applied_via` names the mode:
 
-- default mode: staged settings
-- `mode=immediate`: immediate settings
+- default mode: `staged_settings`
+- `mode=immediate`: `settings`
 
 Supported JSON value shapes are:
 
@@ -172,9 +175,11 @@ Supported JSON value shapes are:
 - integer
 - floating point
 - string
+- array, each element one of these shapes; the block converts each element to its setting's element type
+- an object with exactly the two numbers `real` and `imag`, a complex value
 - nested object
 
-Arrays are rejected. Unsupported runtime reply shapes are surfaced as errors.
+A read returns a list setting as an array and a complex value as the object of `real` and `imag`.
 
 ## Stream Metadata
 
@@ -208,13 +213,14 @@ Stream handling remains runtime-owned:
 - stored graph content is not rewritten during runtime preparation
 - authored endpoint values may remain in graph content, but runtime-owned bindings define the active descriptor for supported managed stream metadata
 - invalid supported stream metadata fails start or restart explicitly
+- the stream routes read the session as `GET /sessions/{id}` does, and a run that is ending by itself returns a conflict error
 - absence of supported stream metadata leaves the session on the no-stream-descriptor path
 
 Do not introduce public stream, websocket, SSE, diagnostics, or history surfaces as part of this feature area.
 
 ## Error Handling
 
-Application services raise typed errors for validation, not-found, invalid-state, runtime, timeout, catalog, and scheduler-catalog failures. The HTTP layer maps those errors into stable JSON error responses.
+Application services raise typed errors for validation, not-found, invalid-state, runtime, catalog, and scheduler-catalog failures. The HTTP layer maps those errors into stable JSON error responses.
 
 Route handlers should not inspect exception internals beyond this mapping. Application services should provide messages that are useful to operators while preserving the narrow API contract.
 

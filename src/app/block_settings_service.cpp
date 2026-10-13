@@ -1,16 +1,60 @@
 #include "gr4cp/app/block_settings_service.hpp"
 
+#include <complex>
+#include <concepts>
+#include <cstdint>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <type_traits>
+#include <variant>
 
 #include "gr4cp/app/session_service.hpp"
 
 namespace gr4cp::app {
 
-BlockSettingsService::BlockSettingsService(storage::SessionRepository& repository,
-                                           runtime::RuntimeManager& runtime_manager)
-    : repository_(repository), runtime_manager_(runtime_manager) {}
+namespace {
+
+template <typename T>
+struct is_tensor : std::false_type {};
+
+template <typename T>
+struct is_tensor<gr::Tensor<T>> : std::true_type {};
+
+template <typename T>
+struct is_complex : std::false_type {};
+
+template <typename T>
+struct is_complex<std::complex<T>> : std::true_type {};
+
+// A complex value reads and writes as an object of its two parts.
+constexpr std::string_view kRealPart = "real";
+constexpr std::string_view kImaginaryPart = "imag";
+
+bool is_complex_object(const nlohmann::json& value) {
+    return value.is_object() && value.size() == 2 && value.contains(kRealPart) && value.contains(kImaginaryPart) &&
+           value[kRealPart].is_number() && value[kImaginaryPart].is_number();
+}
+
+// Converts a value that holds no other value: a scalar, a complex number or a string.
+template <typename T>
+nlohmann::json scalar_to_json(const T& item) {
+    if constexpr (std::same_as<T, std::monostate>) {
+        return nullptr;
+    } else if constexpr (is_complex<T>::value) {
+        return nlohmann::json{{kRealPart, item.real()}, {kImaginaryPart, item.imag()}};
+    } else if constexpr (std::same_as<T, std::string> || std::same_as<T, std::pmr::string> ||
+                         std::same_as<T, std::string_view>) {
+        return std::string(item);
+    } else {
+        return item;
+    }
+}
+
+}  // namespace
+
+BlockSettingsService::BlockSettingsService(SessionService& sessions, runtime::RuntimeManager& runtime_manager)
+    : sessions_(sessions), runtime_manager_(runtime_manager) {}
 
 BlockSettingsUpdateResult BlockSettingsService::update(const std::string& session_id,
                                                        const std::string& block_unique_name,
@@ -23,8 +67,10 @@ BlockSettingsUpdateResult BlockSettingsService::update(const std::string& sessio
         runtime_manager_.set_block_settings(session, block_unique_name, property_map, mode);
     } catch (const runtime::BlockNotFoundError& error) {
         throw NotFoundError(error.what());
-    } catch (const runtime::ReplyTimeoutError& error) {
-        throw TimeoutError(error.what());
+    } catch (const runtime::SessionNotRunningError& error) {
+        throw InvalidStateError(error.what());
+    } catch (const runtime::SettingsRefusedError& error) {
+        throw ValidationError(error.what());
     } catch (const std::exception& error) {
         throw RuntimeError(error.what());
     }
@@ -45,22 +91,19 @@ BlockSettingsService::Json BlockSettingsService::get(const std::string& session_
         return property_map_to_json(runtime_manager_.get_block_settings(session, block_unique_name));
     } catch (const runtime::BlockNotFoundError& error) {
         throw NotFoundError(error.what());
-    } catch (const runtime::ReplyTimeoutError& error) {
-        throw TimeoutError(error.what());
+    } catch (const runtime::SessionNotRunningError& error) {
+        throw InvalidStateError(error.what());
     } catch (const std::exception& error) {
         throw RuntimeError(error.what());
     }
 }
 
-domain::Session BlockSettingsService::load_running_session_or_throw(const std::string& session_id) const {
-    const auto session = repository_.get(session_id);
-    if (!session.has_value()) {
-        throw NotFoundError("session not found: " + session_id);
-    }
-    if (session->state != domain::SessionState::Running) {
+domain::Session BlockSettingsService::load_running_session_or_throw(const std::string& session_id) {
+    auto session = sessions_.get(session_id);
+    if (session.state != domain::SessionState::Running) {
         throw InvalidStateError("session not running: " + session_id);
     }
-    return *session;
+    return session;
 }
 
 gr::property_map BlockSettingsService::json_to_property_map(const Json& value) {
@@ -98,11 +141,20 @@ gr::pmt::Value BlockSettingsService::json_to_pmt_value(const Json& value) {
     if (value.is_string()) {
         return value.get<std::string>();
     }
+    if (is_complex_object(value)) {
+        return std::complex<double>(value[kRealPart].get<double>(), value[kImaginaryPart].get<double>());
+    }
     if (value.is_object()) {
         return json_to_property_map(value);
     }
     if (value.is_array()) {
-        throw ValidationError("settings arrays are not supported");
+        // the block converts each element to its setting's element type, and refuses an element that does not convert
+        gr::Tensor<gr::pmt::Value> elements;
+        elements.reserve(value.size());
+        for (const auto& element : value) {
+            elements.push_back(json_to_pmt_value(element));
+        }
+        return elements;
     }
     throw ValidationError("unsupported JSON value in settings body");
 }
@@ -117,38 +169,23 @@ BlockSettingsService::Json BlockSettingsService::property_map_to_json(const gr::
 
 BlockSettingsService::Json BlockSettingsService::pmt_value_to_json(const gr::pmt::Value& value) {
     Json result;
-    bool converted = false;
-
-    gr::pmt::ValueVisitor([&result, &converted](const auto& item) {
+    gr::pmt::ValueVisitor([&result](const auto& item) {
         using T = std::decay_t<decltype(item)>;
-        if constexpr (std::same_as<T, std::monostate>) {
-            result = nullptr;
-            converted = true;
-        } else if constexpr (std::same_as<T, bool>) {
-            result = item;
-            converted = true;
-        } else if constexpr ((std::integral<T> && !std::same_as<T, bool>) || std::same_as<T, std::uint64_t>) {
-            result = item;
-            converted = true;
-        } else if constexpr (std::floating_point<T>) {
-            result = item;
-            converted = true;
-        } else if constexpr (std::same_as<T, std::string> || std::same_as<T, std::pmr::string>) {
-            result = std::string(item);
-            converted = true;
-        } else if constexpr (std::same_as<T, std::string_view>) {
-            result = std::string(item);
-            converted = true;
+        if constexpr (is_tensor<T>::value) {
+            result = Json::array();
+            for (const auto& element : item) {
+                if constexpr (std::same_as<typename T::value_type, gr::pmt::Value>) {
+                    result.push_back(pmt_value_to_json(element));
+                } else {
+                    result.push_back(scalar_to_json(static_cast<typename T::value_type>(element)));
+                }
+            }
         } else if constexpr (std::same_as<T, gr::property_map>) {
             result = property_map_to_json(item);
-            converted = true;
+        } else {
+            result = scalar_to_json(item);
         }
     }).visit(value);
-
-    if (!converted) {
-        throw RuntimeError("runtime returned unsupported settings value");
-    }
-
     return result;
 }
 

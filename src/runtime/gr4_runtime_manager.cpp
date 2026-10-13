@@ -1,81 +1,44 @@
 #include "gr4cp/runtime/gr4_runtime_manager.hpp"
 
+#include <algorithm>
+#include <array>
+#include <cctype>
 #include <chrono>
+#include <complex>
 #include <concepts>
 #include <cstdlib>
-#include <filesystem>
+#include <expected>
 #include <format>
 #include <iostream>
+#include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <random>
 #include <ranges>
-#include <set>
 #include <span>
 #include <stdexcept>
 #include <string>
-#include <thread>
-#include <type_traits>
+#include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
-#if defined(__unix__) || defined(__APPLE__)
-#include <dlfcn.h>
-#endif
-
-#include <gnuradio-4.0/Graph_yaml_importer.hpp>
-#include <gnuradio-4.0/Graph.hpp>
-#include <gnuradio-4.0/Message.hpp>
-#include <gnuradio-4.0/Port.hpp>
 #include <gnuradio-4.0/PluginLoader.hpp>
-#include <gnuradio-4.0/Scheduler.hpp>
+#include <gnuradio-4.0/Runtime.hpp>
+#include <gnuradio-4.0/SchedulerModel.hpp>
+#include <gnuradio-4.0/SchedulerRegistration.hpp>
 #include <gnuradio-4.0/YamlPmt.hpp>
 #ifndef __EMSCRIPTEN__
 #include <httplib.h>
+#endif
+#if defined(__GLIBC__)
+#include <malloc.h>
 #endif
 
 namespace gr4cp::runtime {
 
 namespace {
-
-template<typename TResult>
-bool connection_succeeded(const TResult& result) {
-    if constexpr (requires { result.has_value(); }) {
-        return result.has_value();
-    } else if constexpr (std::is_enum_v<std::remove_cvref_t<TResult>>) {
-        using raw_t = std::underlying_type_t<std::remove_cvref_t<TResult>>;
-        return static_cast<raw_t>(result) == 0;
-    } else {
-        return static_cast<bool>(result);
-    }
-}
-
-template<typename TResult>
-std::string connection_error_message(const TResult& result) {
-    if constexpr (requires { result.error().message; }) {
-        return result.error().message;
-    } else {
-        return "failed to connect ports";
-    }
-}
-
-std::vector<std::filesystem::path> split_plugin_directories(std::string_view paths) {
-    std::vector<std::filesystem::path> directories;
-    std::size_t start = 0;
-    while (start <= paths.size()) {
-        const auto end = paths.find(':', start);
-        const auto token = paths.substr(start, end == std::string_view::npos ? paths.size() - start : end - start);
-        if (!token.empty()) {
-            directories.emplace_back(token);
-        }
-        if (end == std::string_view::npos) {
-            break;
-        }
-        start = end + 1;
-    }
-    return directories;
-}
 
 bool stream_debug_enabled() {
     if (const char* env = std::getenv("GR4CP_STREAM_DEBUG"); env != nullptr) {
@@ -91,221 +54,39 @@ void stream_debug(std::string_view message) {
     std::clog << "[gr4cp stream] " << message << '\n';
 }
 
-void prepend_library_search_path(const std::vector<std::filesystem::path>& plugin_directories) {
-#if !defined(_WIN32)
-    std::string value;
-    for (const auto& directory : plugin_directories) {
-        if (!value.empty()) {
-            value += ":";
-        }
-        value += directory.string();
-    }
-    if (const char* existing = std::getenv("LD_LIBRARY_PATH"); existing != nullptr && *existing != '\0') {
-        if (!value.empty()) {
-            value += ":";
-        }
-        value += existing;
-    }
-    if (!value.empty()) {
-        ::setenv("LD_LIBRARY_PATH", value.c_str(), 1);
-    }
-#else
-    (void)plugin_directories;
-#endif
-}
-
-void configure_plugin_environment(const std::vector<std::filesystem::path>& plugin_directories) {
-    std::string value;
-    for (const auto& directory : plugin_directories) {
-        if (!value.empty()) {
-            value += ":";
-        }
-        value += directory.string();
-    }
-    if (!value.empty()) {
-        ::setenv("GNURADIO4_PLUGIN_DIRECTORIES", value.c_str(), 1);
-    }
-    prepend_library_search_path(plugin_directories);
-}
-
-bool is_shared_library(const std::filesystem::path& path) {
-#if defined(__APPLE__)
-    constexpr auto extension = ".dylib";
-#elif defined(_WIN32)
-    constexpr auto extension = ".dll";
-#else
-    constexpr auto extension = ".so";
-#endif
-    return path.extension() == extension;
-}
-
-bool is_shared_block_library(const std::filesystem::path& path) {
-    return is_shared_library(path) && path.filename().string().find("Shared") != std::string::npos;
-}
-
-void preload_support_libraries(const std::vector<std::filesystem::path>& plugin_directories) {
-#if defined(__unix__) || defined(__APPLE__)
-    static std::vector<void*> handles;
-    static std::set<std::string> loaded_libraries;
-
-    auto should_preload = [](const std::filesystem::path& path) {
-        const auto name = path.filename().string();
-        return name == "libgnuradio-blocklib-core.so" || name == "libgnuradio-plugin.so";
-    };
-
-    for (const auto& directory : plugin_directories) {
-        if (!std::filesystem::is_directory(directory)) {
-            continue;
-        }
-        for (const auto& entry : std::filesystem::directory_iterator(directory)) {
-            if (!entry.is_regular_file() || !should_preload(entry.path())) {
-                continue;
-            }
-            const auto library = entry.path().string();
-            if (!loaded_libraries.insert(library).second) {
-                continue;
-            }
-            void* handle = ::dlopen(library.c_str(), RTLD_NOW | RTLD_GLOBAL);
-            if (handle == nullptr) {
-                loaded_libraries.erase(library);
-                const char* error = ::dlerror();
-                throw std::runtime_error("failed to preload GNU Radio 4 support library " + library +
-                                         (error != nullptr ? ": " + std::string(error) : ""));
-            }
-            handles.push_back(handle);
-        }
-    }
-#else
-    (void)plugin_directories;
-#endif
-}
-
-std::string module_name_from_library(const std::filesystem::path& path) {
-    std::string name = path.filename().string();
-    if (name.rfind("lib", 0) == 0) {
-        name = name.substr(3);
-    }
-    if (name.ends_with(".so")) {
-        name.resize(name.size() - 3);
-    } else if (name.ends_with(".dylib")) {
-        name.resize(name.size() - 6);
-    }
-    if (name.ends_with("Shared")) {
-        name.resize(name.size() - 6);
-    }
-    return name;
-}
-
-void bootstrap_shared_block_libraries(const std::vector<std::filesystem::path>& plugin_directories) {
-#if defined(__unix__) || defined(__APPLE__)
-    static std::vector<void*> handles;
-    static std::set<std::string> retained;
-
-    using init_fn_t = std::size_t (*)(gr::BlockRegistry&);
-
-    for (const auto& directory : plugin_directories) {
-        if (!std::filesystem::is_directory(directory)) {
-            continue;
-        }
-        for (const auto& entry : std::filesystem::directory_iterator(directory)) {
-            if (!entry.is_regular_file() || !is_shared_block_library(entry.path())) {
-                continue;
-            }
-
-            const auto library_string = entry.path().string();
-            if (!retained.insert(library_string).second) {
-                continue;
-            }
-
-            void* handle = ::dlopen(library_string.c_str(), RTLD_NOW | RTLD_GLOBAL);
-            if (handle == nullptr) {
-                retained.erase(library_string);
-                const char* error = ::dlerror();
-                throw std::runtime_error("failed to load GNU Radio 4 shared block library " + library_string +
-                                         (error != nullptr ? ": " + std::string(error) : ""));
-            }
-
-            const auto symbol_name = std::string("gr_blocklib_init_module_") + module_name_from_library(entry.path());
-            auto* init_fn = reinterpret_cast<init_fn_t>(::dlsym(handle, symbol_name.c_str()));
-            if (init_fn == nullptr) {
-                handles.push_back(handle);
-                continue;
-            }
-
-            try {
-                (void)init_fn(gr::globalBlockRegistry());
-            } catch (const std::exception& error) {
-                throw std::runtime_error("failed to initialize GNU Radio 4 shared block library " + library_string +
-                                         ": " + error.what());
-            }
-            handles.push_back(handle);
-        }
-    }
-#else
-    (void)plugin_directories;
-#endif
-}
-
-void ensure_runtime_environment(const std::vector<std::filesystem::path>& plugin_directories) {
-    static std::once_flag once;
-    static std::optional<std::string> bootstrap_error;
-
-    std::call_once(once, [&]() {
-        try {
-            if (plugin_directories.empty()) {
-                throw std::runtime_error("no GNU Radio 4 plugin directories are configured");
-            }
-            configure_plugin_environment(plugin_directories);
-            preload_support_libraries(plugin_directories);
-            bootstrap_shared_block_libraries(plugin_directories);
-            auto& loader = gr::globalPluginLoader();
-            (void)loader.availableBlocks();
-        } catch (const std::exception& error) {
-            bootstrap_error = error.what();
-        }
-    });
-
-    if (bootstrap_error.has_value()) {
-        throw std::runtime_error("GNU Radio 4 runtime initialization failed: " + *bootstrap_error);
-    }
-}
-
 std::runtime_error runtime_error(const domain::Session& session, std::string_view phase, const std::string& detail) {
     return std::runtime_error(std::format("session {} {} failed: {}", session.id, phase, detail));
 }
 
-void register_default_schedulers() {
-    auto& registry = gr::globalSchedulerRegistry();
-    (void)registry.insert<gr::scheduler::Simple<gr::scheduler::ExecutionPolicy::singleThreaded>>("=gr::scheduler::SimpleSingle");
-    (void)registry.insert<gr::scheduler::Simple<gr::scheduler::ExecutionPolicy::multiThreaded>>("=gr::scheduler::SimpleMulti");
+constexpr std::array<SchedulerAlias, 2> kSchedulerAliases{{
+    {"gr::scheduler::SimpleSingle", "gr::scheduler::Simple<singleThreaded>"},
+    {"gr::scheduler::SimpleMulti", "gr::scheduler::Simple<multiThreaded>"},
+}};
+
+// Creates the core scheduler type the alias at `Index` names.
+template <std::size_t Index>
+std::unique_ptr<gr::SchedulerModel> make_aliased_scheduler(gr::property_map parameters) {
+    return gr::globalSchedulerRegistry().create(kSchedulerAliases[Index].type, std::move(parameters));
 }
 
-std::string default_scheduler_alias() {
-    register_default_schedulers();
-
-    auto available = gr::globalPluginLoader().availableSchedulers();
-    std::ranges::sort(available);
+std::string default_scheduler_type(const gr::PluginLoader& loader) {
+    std::ignore = gr::registerBuiltinSchedulers();
+    const auto available = loader.availableSchedulers();
 
     for (const auto preferred : {
              std::string_view{"gr::incubator::scheduler::BlockingBackoff"},
              std::string_view{"gr::scheduler::SimpleMulti"},
              std::string_view{"gr::scheduler::SimpleSingle"},
          }) {
-        if (std::ranges::binary_search(available, preferred)) {
-            return std::string(preferred);
+        if (const auto type = core_scheduler_type(preferred); std::ranges::binary_search(available, type)) {
+            return type;
         }
     }
 
     if (!available.empty()) {
         return available.front();
     }
-    return "gr::scheduler::SimpleMulti";
-}
-
-std::string next_request_id() {
-    thread_local std::mt19937_64 generator(std::random_device{}());
-    std::uniform_int_distribution<unsigned long long> distribution;
-    return std::format("req_{:016x}", distribution(generator));
+    return std::string(gr::Runtime::kDefaultScheduler);
 }
 
 std::optional<std::string> value_as_string(const gr::pmt::Value& value) {
@@ -321,76 +102,107 @@ std::optional<std::string> value_as_string(const gr::pmt::Value& value) {
     return result;
 }
 
-std::string describe_runtime_block(const std::shared_ptr<gr::BlockModel>& block) {
-    std::string description(block->uniqueName());
+std::optional<std::string> settings_name(const gr::BlockHandle& block) {
+    const auto value = block.get(std::string("name"));
+    return value.has_value() ? value_as_string(*value) : std::nullopt;
+}
 
-    if (const auto name = std::string(block->name()); !name.empty() && name != description) {
+std::string describe_runtime_block(const gr::BlockHandle& block) {
+    std::string description(block.uniqueName());
+
+    if (const auto name = std::string(block.name()); !name.empty() && name != description) {
         description += std::format(" (name={})", name);
     }
 
-    if (const auto type_name = std::string(block->typeName()); !type_name.empty()) {
+    if (const auto type_name = std::string(block.typeName()); !type_name.empty()) {
         description += std::format(" [type={}]", type_name);
     }
 
-    if (const auto& settings = block->settings().get(); settings.contains("name")) {
-        if (const auto settings_name = value_as_string(settings.at("name")); settings_name.has_value() && !settings_name->empty() &&
-                                                                           *settings_name != std::string(block->uniqueName()) &&
-                                                                           *settings_name != std::string(block->name())) {
-            description += std::format(" [settings.name={}]", *settings_name);
-        }
+    if (const auto name = settings_name(block);
+        name.has_value() && !name->empty() && *name != block.uniqueName() && *name != block.name()) {
+        description += std::format(" [settings.name={}]", *name);
     }
 
     return description;
 }
 
-std::string summarize_runtime_blocks(const gr::BlockModel& root) {
-    if (root.blocks().empty()) {
-        return "<none>";
+BlockNotFoundError make_block_not_found_error(const std::map<std::string, gr::BlockHandle, std::less<>>& blocks,
+                                              std::string_view block_unique_name) {
+    std::string available;
+    for (const auto& [_, block] : blocks) {
+        available += available.empty() ? describe_runtime_block(block) : ", " + describe_runtime_block(block);
     }
+    return BlockNotFoundError(std::format("block not found in running session: {}; available runtime blocks: {}",
+                                          block_unique_name,
+                                          available.empty() ? "<none>" : available));
+}
 
-    std::string result;
-    bool first = true;
-    for (const auto& block : root.blocks()) {
-        if (!first) {
-            result += ", ";
+// The name rule: a block's name, then its unique name, then its `name` setting. A name or a `name` setting two blocks
+// carry is refused with the candidates.
+gr::BlockHandle* resolve_runtime_block(std::map<std::string, gr::BlockHandle, std::less<>>& blocks,
+                                       std::string_view requested_block_target) {
+    const auto only_match = [&blocks, requested_block_target](auto carries) -> gr::BlockHandle* {
+        std::vector<gr::BlockHandle*> matches;
+        for (auto& [_, block] : blocks) {
+            if (carries(block)) {
+                matches.push_back(&block);
+            }
         }
-        result += describe_runtime_block(block);
-        first = false;
+        if (matches.size() > 1) {
+            std::string candidates;
+            for (const auto* block : matches) {
+                candidates += candidates.empty() ? describe_runtime_block(*block) : ", " + describe_runtime_block(*block);
+            }
+            throw BlockNotFoundError(std::format("block name {} names more than one runtime block: {}",
+                                                 requested_block_target,
+                                                 candidates));
+        }
+        return matches.empty() ? nullptr : matches.front();
+    };
+
+    if (auto* block = only_match([requested_block_target](const gr::BlockHandle& block) {
+            return block.name() == requested_block_target;
+        })) {
+        return block;
+    }
+    if (const auto it = blocks.find(requested_block_target); it != blocks.end()) {
+        return &it->second;
+    }
+    return only_match([requested_block_target](const gr::BlockHandle& block) {
+        return settings_name(block) == requested_block_target;
+    });
+}
+
+// Converts a double-precision complex patch value to single precision when the block holds a single-precision complex
+// value, and each such element of a list when the block holds a list of them. The framework converts neither complex
+// precision to the other.
+gr::pmt::Value with_held_complex_precision(const gr::pmt::Value& value, const std::optional<gr::pmt::Value>& held) {
+    if (!held.has_value()) {
+        return value;
+    }
+    const auto narrowed = [](const gr::pmt::Value& item) -> gr::pmt::Value {
+        if (const auto* wide = item.get_if<std::complex<double>>(); wide != nullptr) {
+            return std::complex<float>(static_cast<float>(wide->real()), static_cast<float>(wide->imag()));
+        }
+        return item;
+    };
+    if (held->get_if<std::complex<float>>() != nullptr) {
+        return narrowed(value);
+    }
+    const auto* elements = value.get_if<gr::Tensor<gr::pmt::Value>>();
+    if (held->get_if<gr::Tensor<std::complex<float>>>() == nullptr || elements == nullptr) {
+        return value;
+    }
+    gr::Tensor<gr::pmt::Value> result;
+    result.reserve(elements->size());
+    for (const auto& element : *elements) {
+        result.push_back(narrowed(element));
     }
     return result;
 }
 
-BlockNotFoundError make_block_not_found_error(const gr::BlockModel& root, std::string_view block_unique_name) {
-    return BlockNotFoundError(std::format("block not found in running session: {}; available runtime blocks: {}",
-                                          block_unique_name,
-                                          summarize_runtime_blocks(root)));
-}
-
-std::shared_ptr<gr::BlockModel> resolve_runtime_block(const gr::BlockModel& root, std::string_view requested_block_target) {
-    for (const auto& block : root.blocks()) {
-        if (block->name() == requested_block_target) {
-            return block;
-        }
-    }
-
-    for (const auto& block : root.blocks()) {
-        if (block->uniqueName() == requested_block_target) {
-            return block;
-        }
-    }
-
-    for (const auto& block : root.blocks()) {
-        const auto& settings = block->settings().get();
-        if (!settings.contains("name")) {
-            continue;
-        }
-        const auto settings_name = value_as_string(settings.at("name"));
-        if (settings_name.has_value() && *settings_name == requested_block_target) {
-            return block;
-        }
-    }
-
-    return nullptr;
+SessionNotRunningError not_running(const domain::Session& session, std::string_view action) {
+    return SessionNotRunningError(std::format("session {} {} failed: session runtime is not running", session.id, action));
 }
 
 void normalize_block(gr::property_map& block) {
@@ -521,69 +333,7 @@ bool normalize_connection(gr::pmt::Value& connection) {
     return true;
 }
 
-bool inject_stream_bindings(gr::property_map& root, const std::vector<domain::RuntimeStreamBinding>& bindings) {
-    if (bindings.empty()) {
-        return false;
-    }
-
-    auto it = root.find("blocks");
-    if (it == root.end()) {
-        return false;
-    }
-    auto* blocks = it->second.get_if<gr::Tensor<gr::pmt::Value>>();
-    if (blocks == nullptr) {
-        return false;
-    }
-
-    bool changed = false;
-    std::set<std::string> injected_stream_ids;
-    for (auto& block_value : *blocks) {
-        auto* block = block_value.get_if<gr::property_map>();
-        if (block == nullptr) {
-            continue;
-        }
-
-        gr::property_map parameters;
-        if (const auto parameters_it = block->find("parameters"); parameters_it != block->end()) {
-            if (const auto* existing = parameters_it->second.get_if<gr::property_map>(); existing != nullptr) {
-                parameters = *existing;
-            }
-        }
-
-        std::optional<std::string> name;
-        if (const auto name_it = parameters.find("name"); name_it != parameters.end()) {
-            name = value_as_string(name_it->second);
-        }
-        if (!name.has_value() || name->empty()) {
-            if (const auto instance_it = block->find("instance_name"); instance_it != block->end()) {
-                name = value_as_string(instance_it->second);
-            }
-        }
-        if (!name.has_value() || name->empty()) {
-            continue;
-        }
-
-        for (const auto& binding : bindings) {
-            if (binding.plan.block_instance_name != *name) {
-                continue;
-            }
-            parameters["endpoint"] = binding.internal.endpoint;
-            parameters["transport"] = binding.plan.transport;
-            (*block)["parameters"] = parameters;
-            injected_stream_ids.insert(binding.plan.stream_id);
-            changed = true;
-            break;
-        }
-    }
-
-    if (injected_stream_ids.size() != bindings.size()) {
-        throw std::runtime_error("failed to inject all managed stream bindings into runtime graph");
-    }
-
-    return changed;
-}
-
-std::string normalize_graph_content(std::string_view content, const std::vector<domain::RuntimeStreamBinding>& bindings = {}) {
+std::string normalize_graph_content(std::string_view content) {
     const auto parsed = gr::pmt::yaml::deserialize(content);
     if (!parsed.has_value()) {
         return std::string(content);
@@ -612,62 +362,69 @@ std::string normalize_graph_content(std::string_view content, const std::vector<
         }
     }
 
-    changed = inject_stream_bindings(root, bindings) || changed;
-
     return changed ? gr::pmt::yaml::serialize(root) : std::string(content);
-}
-
-template <gr::message::Command Command>
-gr::Message send_block_settings_request(gr::BlockModel& scheduler_block,
-                                        std::string_view block_unique_name,
-                                        std::string_view endpoint,
-                                        gr::property_map payload,
-                                        std::chrono::milliseconds timeout) {
-    gr::MsgPortOutBuiltin request_port;
-    gr::MsgPortInBuiltin response_port;
-
-    if (auto connection = request_port.connect(*scheduler_block.msgIn); !connection_succeeded(connection)) {
-        throw std::runtime_error(std::format("failed to connect runtime request port: {}", connection_error_message(connection)));
-    }
-    if (auto connection = scheduler_block.msgOut->connect(response_port); !connection_succeeded(connection)) {
-        throw std::runtime_error(std::format("failed to connect runtime response port: {}", connection_error_message(connection)));
-    }
-
-    const auto request_id = next_request_id();
-    gr::sendMessage<Command>(request_port, block_unique_name, endpoint, std::move(payload), request_id);
-
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
-        const auto available = response_port.streamReader().available();
-        if (available == 0UZ) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            continue;
-        }
-
-        gr::ReaderSpanLike auto replies = response_port.streamReader().get<gr::SpanReleasePolicy::ProcessAll>(available);
-        for (const auto& reply : replies) {
-            if (reply.clientRequestID != request_id || reply.endpoint != endpoint || reply.serviceName != block_unique_name) {
-                continue;
-            }
-            return reply;
-        }
-    }
-
-    throw ReplyTimeoutError(std::format("timed out waiting for runtime reply from block {}", block_unique_name));
-}
-
-gr::property_map parse_settings_reply(const gr::Message& reply, std::string_view block_unique_name, std::string_view endpoint) {
-    if (!reply.data.has_value()) {
-        throw std::runtime_error(std::format("runtime returned error for block {} {}: {}", block_unique_name, endpoint, reply.data.error().message));
-    }
-    return reply.data.value();
 }
 
 }  // namespace
 
+std::span<const SchedulerAlias> scheduler_aliases() {
+    return kSchedulerAliases;
+}
+
+void register_scheduler_aliases() {
+    static const bool registered = []<std::size_t... Index>(std::index_sequence<Index...>) {
+        std::ignore = gr::registerBuiltinSchedulers();
+        auto& registry = gr::globalSchedulerRegistry();
+        ((std::ignore = registry.insert(kSchedulerAliases[Index].alias,
+                                        "",
+                                        &make_aliased_scheduler<Index>,
+                                        registry.attributes(kSchedulerAliases[Index].type).value_or(gr::property_map{}))),
+         ...);
+        return true;
+    }(std::make_index_sequence<kSchedulerAliases.size()>{});
+    std::ignore = registered;
+}
+
+std::string core_scheduler_type(std::string_view scheduler_id) {
+    for (const auto& [alias, type] : kSchedulerAliases) {
+        if (alias == scheduler_id) {
+            return std::string(type);
+        }
+    }
+    return std::string(scheduler_id);
+}
+
+namespace {
+
+// Returns every malloc arena's free pages to the system when it is destroyed. glibc serves each new thread from an arena
+// of its own, up to eight per core, and keeps freed pages resident in their arena. A server that builds each session's
+// graph on the thread that took the request otherwise holds one graph's pages per such thread after the sessions are
+// deleted.
+struct HeapRelease {
+    HeapRelease() = default;
+    HeapRelease(const HeapRelease&) = delete;
+    HeapRelease& operator=(const HeapRelease&) = delete;
+    ~HeapRelease() {
+#if defined(__GLIBC__)
+        ::malloc_trim(0);
+#endif
+    }
+};
+
+}  // namespace
+
 struct Gr4RuntimeManager::Execution {
-    std::shared_ptr<gr::SchedulerModel> scheduler;
+    HeapRelease heap_release;  // declared first, so that it is destroyed after the runtime and the blocks
+    std::optional<gr::Runtime> runtime;
+    std::map<std::string, gr::BlockHandle, std::less<>> blocks;  // every block of the graph, by unique name
     bool running{false};
+};
+
+// A session's run, held under its resources' lock.
+struct Gr4RuntimeManager::RunningExecution {
+    std::shared_ptr<SessionRuntimeResources> resources;
+    std::unique_lock<std::mutex> lock;
+    Execution& execution;
 };
 
 struct Gr4RuntimeManager::SessionRuntimeResources {
@@ -676,14 +433,12 @@ struct Gr4RuntimeManager::SessionRuntimeResources {
     LifecyclePhase lifecycle_phase{LifecyclePhase::Idle};
     bool teardown_complete{true};
     std::optional<std::string> teardown_error;
-    std::optional<std::string> async_error;
     std::unique_ptr<Execution> execution;
     std::vector<domain::RuntimeStreamBinding> stream_bindings;
     std::mutex mutex;
 };
 
-Gr4RuntimeManager::Gr4RuntimeManager(std::vector<std::filesystem::path> plugin_directories)
-    : plugin_directories_(plugin_directories.empty() ? default_plugin_directories() : std::move(plugin_directories)) {}
+Gr4RuntimeManager::Gr4RuntimeManager(std::shared_ptr<gr::PluginLoader> loader) : loader_(std::move(loader)) {}
 
 Gr4RuntimeManager::~Gr4RuntimeManager() {
     std::vector<std::shared_ptr<SessionRuntimeResources>> resources;
@@ -704,22 +459,11 @@ Gr4RuntimeManager::~Gr4RuntimeManager() {
             domain::Session session;
             session.id = resource->session_id;
             std::unique_lock resource_lock(resource->mutex);
-            stop_locked(session, *resource, resource_lock);
+            std::ignore = stop_locked(session, *resource, resource_lock);
         } catch (...) {
         }
 
     }
-}
-
-std::vector<std::filesystem::path> Gr4RuntimeManager::default_plugin_directories() {
-    if (const char* env = std::getenv("GNURADIO4_PLUGIN_DIRECTORIES"); env != nullptr && *env != '\0') {
-        return split_plugin_directories(env);
-    }
-#if defined(GR4CP_DEFAULT_GNURADIO4_PLUGIN_DIR)
-    return split_plugin_directories(GR4CP_DEFAULT_GNURADIO4_PLUGIN_DIR);
-#else
-    return {};
-#endif
 }
 
 void Gr4RuntimeManager::prepare(const domain::Session& session) {
@@ -740,23 +484,26 @@ void Gr4RuntimeManager::start(const domain::Session& session) {
         return;
     }
 
-    resources->async_error.reset();
     resources->teardown_error.reset();
     resources->teardown_complete = false;
     resources->lifecycle_phase = LifecyclePhase::Starting;
-    execution.scheduler->start();
+    if (const auto error = execution.runtime->start(); error.has_value()) {
+        resources->lifecycle_phase = LifecyclePhase::Idle;
+        resources->teardown_complete = true;
+        throw runtime_error(session, "start", error->message);
+    }
     execution.running = true;
     resources->lifecycle_phase = LifecyclePhase::Running;
 }
 
-void Gr4RuntimeManager::stop(const domain::Session& session) {
+std::optional<std::string> Gr4RuntimeManager::stop(const domain::Session& session) {
     auto resources = find_resources(session.id);
     if (!resources) {
-        return;
+        return std::nullopt;
     }
 
     std::unique_lock resource_lock(resources->mutex);
-    stop_locked(session, *resources, resource_lock);
+    return stop_locked(session, *resources, resource_lock);
 }
 
 void Gr4RuntimeManager::destroy(const domain::Session& session) {
@@ -767,7 +514,7 @@ void Gr4RuntimeManager::destroy(const domain::Session& session) {
 
     {
         std::unique_lock resource_lock(resources->mutex);
-        stop_locked(session, *resources, resource_lock);
+        std::ignore = stop_locked(session, *resources, resource_lock);
         resources->execution.reset();
         release_stream_bindings_locked(*resources);
         resources->lifecycle_phase = LifecyclePhase::Idle;
@@ -783,20 +530,13 @@ void Gr4RuntimeManager::destroy(const domain::Session& session) {
 }
 
 std::optional<domain::StreamRuntimePlan> Gr4RuntimeManager::active_stream_plan(const domain::Session& session) {
-    auto resources = find_resources(session.id);
-    if (!resources) {
-        return std::nullopt;
-    }
-
-    std::lock_guard resource_lock(resources->mutex);
-    const auto* execution = resources->execution.get();
-    if (execution == nullptr || !execution->running || resources->lifecycle_phase != LifecyclePhase::Running ||
-        resources->stream_bindings.empty()) {
+    const auto run = live_execution(session);
+    if (!run.has_value() || run->resources->stream_bindings.empty()) {
         return std::nullopt;
     }
 
     domain::StreamRuntimePlan plan;
-    for (const auto& binding : resources->stream_bindings) {
+    for (const auto& binding : run->resources->stream_bindings) {
         plan.streams.push_back(binding.plan);
     }
     return plan;
@@ -809,21 +549,16 @@ HttpStreamResponse Gr4RuntimeManager::fetch_http_stream(const domain::Session& s
 #else
     domain::InternalStreamBinding internal;
     {
-        auto resources = find_resources(session.id);
-        if (!resources) {
-            throw runtime_error(session, "stream fetch", "session runtime is not running");
+        const auto run = live_execution(session);
+        if (!run.has_value()) {
+            throw not_running(session, "stream fetch");
         }
 
-        std::lock_guard resource_lock(resources->mutex);
-        const auto* execution = resources->execution.get();
-        if (execution == nullptr || !execution->running || resources->lifecycle_phase != LifecyclePhase::Running) {
-            throw runtime_error(session, "stream fetch", "session runtime is not running");
-        }
-
-        const auto binding_it = std::ranges::find_if(resources->stream_bindings, [&](const auto& binding) {
+        const auto& bindings = run->resources->stream_bindings;
+        const auto binding_it = std::ranges::find_if(bindings, [&](const auto& binding) {
             return binding.plan.stream_id == stream_id && binding.plan.transport != "websocket";
         });
-        if (binding_it == resources->stream_bindings.end()) {
+        if (binding_it == bindings.end()) {
             throw runtime_error(session, "stream fetch", "stream not found in active runtime resources: " + stream_id);
         }
         internal = binding_it->internal;
@@ -863,21 +598,16 @@ HttpStreamResponse Gr4RuntimeManager::fetch_http_stream(const domain::Session& s
 }
 
 WebSocketStreamRoute Gr4RuntimeManager::resolve_websocket_stream(const domain::Session& session, const std::string& stream_id) {
-    auto resources = find_resources(session.id);
-    if (!resources) {
-        throw runtime_error(session, "websocket route", "session runtime is not running");
+    const auto run = live_execution(session);
+    if (!run.has_value()) {
+        throw not_running(session, "websocket route");
     }
 
-    std::lock_guard resource_lock(resources->mutex);
-    const auto* execution = resources->execution.get();
-    if (execution == nullptr || !execution->running || resources->lifecycle_phase != LifecyclePhase::Running) {
-        throw runtime_error(session, "websocket route", "session runtime is not running");
-    }
-
-    const auto binding_it = std::ranges::find_if(resources->stream_bindings, [&](const auto& binding) {
+    const auto& bindings = run->resources->stream_bindings;
+    const auto binding_it = std::ranges::find_if(bindings, [&](const auto& binding) {
         return binding.plan.stream_id == stream_id && binding.plan.transport == "websocket";
     });
-    if (binding_it == resources->stream_bindings.end()) {
+    if (binding_it == bindings.end()) {
         throw runtime_error(session, "websocket route", "stream not found in active runtime resources: " + stream_id);
     }
 
@@ -888,83 +618,91 @@ void Gr4RuntimeManager::set_block_settings(const domain::Session& session,
                                            const std::string& block_target,
                                            const gr::property_map& patch,
                                            BlockSettingsMode mode) {
-    auto resources = find_resources(session.id);
-    if (!resources) {
-        throw runtime_error(session, "settings update", "session runtime is not running");
-    }
-    std::lock_guard resource_lock(resources->mutex);
-    auto* execution = resources->execution.get();
-    if (execution == nullptr || !execution->running || resources->lifecycle_phase != LifecyclePhase::Running) {
-        throw runtime_error(session, "settings update", "session runtime is not running");
+    (void)mode;
+    auto run = live_execution(session);
+    if (!run.has_value()) {
+        throw not_running(session, "settings update");
     }
 
-    auto* scheduler_block = execution->scheduler->asBlockModel();
-    if (scheduler_block == nullptr) {
-        throw runtime_error(session, "settings update", "scheduler does not expose a runtime block model");
+    auto* block = resolve_runtime_block(run->execution.blocks, block_target);
+    if (block == nullptr) {
+        throw make_block_not_found_error(run->execution.blocks, block_target);
     }
-
-    const auto resolved_block = resolve_runtime_block(*scheduler_block, block_target);
-    if (!resolved_block) {
-        throw make_block_not_found_error(*scheduler_block, block_target);
+    const auto accepted = block->writableMembers();
+    std::string foreign;
+    for (const auto& [key, _] : patch) {
+        if (!accepted.contains(std::string(key))) {
+            foreign += foreign.empty() ? std::string(key) : ", " + std::string(key);
+        }
     }
-    const auto runtime_block_id = std::string(resolved_block->uniqueName());
-
-    const auto* endpoint = mode == BlockSettingsMode::Staged ? gr::block::property::kStagedSetting
-                                                             : gr::block::property::kSetting;
-    try {
-        const auto reply = send_block_settings_request<gr::message::Command::Set>(
-            *scheduler_block,
-            runtime_block_id,
-            endpoint,
-            patch,
-            std::chrono::milliseconds(1000));
-        (void)parse_settings_reply(reply, runtime_block_id, endpoint);
-    } catch (const BlockNotFoundError&) {
-        throw;
-    } catch (const ReplyTimeoutError&) {
-        throw;
-    } catch (const std::exception& error) {
-        throw runtime_error(session, "settings update", error.what());
+    if (!foreign.empty()) {
+        throw SettingsRefusedError(std::format("block {} has no setting named {}", block_target, foreign));
+    }
+    gr::property_map converted;
+    for (const auto& [key, value] : patch) {
+        converted.insert_or_assign(key, with_held_complex_precision(value, block->get(std::string(key))));
+    }
+    const auto staged = block->setStaged(converted);
+    if (!staged.has_value()) {
+        throw SettingsRefusedError(std::format("block {} refused the settings: {}", block_target, staged.error().message));
+    }
+    // setStaged returns the pairs the block does not declare, and after the key check above it returns none.
+    if (!staged->empty()) {
+        std::string undeclared;
+        for (const auto& [key, _] : *staged) {
+            undeclared += undeclared.empty() ? std::string(key) : ", " + std::string(key);
+        }
+        throw SettingsRefusedError(std::format("block {} does not declare {}", block_target, undeclared));
     }
 }
 
 gr::property_map Gr4RuntimeManager::get_block_settings(const domain::Session& session, const std::string& block_target) {
-    auto resources = find_resources(session.id);
-    if (!resources) {
-        throw runtime_error(session, "settings read", "session runtime is not running");
-    }
-    std::lock_guard resource_lock(resources->mutex);
-    auto* execution = resources->execution.get();
-    if (execution == nullptr || !execution->running || resources->lifecycle_phase != LifecyclePhase::Running) {
-        throw runtime_error(session, "settings read", "session runtime is not running");
+    auto run = live_execution(session);
+    if (!run.has_value()) {
+        throw not_running(session, "settings read");
     }
 
-    auto* scheduler_block = execution->scheduler->asBlockModel();
-    if (scheduler_block == nullptr) {
-        throw runtime_error(session, "settings read", "scheduler does not expose a runtime block model");
+    auto* block = resolve_runtime_block(run->execution.blocks, block_target);
+    if (block == nullptr) {
+        throw make_block_not_found_error(run->execution.blocks, block_target);
+    }
+    return block->get();
+}
+
+RunObservation Gr4RuntimeManager::observe(const domain::Session& session) {
+    auto run = running_execution(session);
+    if (!run.has_value()) {
+        throw not_running(session, "observe");
+    }
+    auto& runtime = *run->execution.runtime;
+
+    RunObservation observation;
+    for (const auto& event : runtime.pollEvents(std::numeric_limits<std::size_t>::max())) {
+        if (event.isError) {
+            observation.last_error = event.text;
+        }
+    }
+    if (!runtime.waitFor(std::chrono::nanoseconds{0})) {
+        return observation;
     }
 
-    const auto resolved_block = resolve_runtime_block(*scheduler_block, block_target);
-    if (!resolved_block) {
-        throw make_block_not_found_error(*scheduler_block, block_target);
+    observation.ended = true;
+    if (const auto result = runtime.result(); !result.has_value()) {
+        observation.run_error = result.error().message;
     }
-    const auto runtime_block_id = std::string(resolved_block->uniqueName());
-
-    try {
-        const auto reply = send_block_settings_request<gr::message::Command::Get>(
-            *scheduler_block,
-            runtime_block_id,
-            gr::block::property::kSetting,
-            {},
-            std::chrono::milliseconds(1000));
-        return parse_settings_reply(reply, runtime_block_id, gr::block::property::kSetting);
-    } catch (const BlockNotFoundError&) {
-        throw;
-    } catch (const ReplyTimeoutError&) {
-        throw;
-    } catch (const std::exception& error) {
-        throw runtime_error(session, "settings read", error.what());
-    }
+    auto& resources = *run->resources;
+    // the graph and its blocks go first, then the ports their stream bindings held
+    observation.ended_run = std::shared_ptr<Execution>(
+        resources.execution.release(),
+        [this, bindings = std::exchange(resources.stream_bindings, {})](Execution* ended) {
+            delete ended;
+            for (const auto& binding : bindings) {
+                stream_allocator_.release(binding.internal);
+            }
+        });
+    resources.lifecycle_phase = LifecyclePhase::Idle;
+    resources.teardown_complete = true;
+    return observation;
 }
 
 std::shared_ptr<Gr4RuntimeManager::SessionRuntimeResources> Gr4RuntimeManager::get_or_create_resources(const domain::Session& session) {
@@ -983,6 +721,47 @@ std::shared_ptr<Gr4RuntimeManager::SessionRuntimeResources> Gr4RuntimeManager::f
     return it == resources_.end() ? nullptr : it->second;
 }
 
+std::optional<std::string> Gr4RuntimeManager::scheduler_type(const domain::Session& session) {
+    auto resources = find_resources(session.id);
+    if (!resources) {
+        return std::nullopt;
+    }
+    std::lock_guard resource_lock(resources->mutex);
+    const auto* execution = resources->execution.get();
+    if (execution == nullptr || !execution->runtime.has_value()) {
+        return std::nullopt;
+    }
+    return std::string(execution->runtime->scheduler().typeName());
+}
+
+std::optional<Gr4RuntimeManager::RunningExecution> Gr4RuntimeManager::running_execution(const domain::Session& session) {
+    auto resources = find_resources(session.id);
+    if (!resources) {
+        return std::nullopt;
+    }
+    std::unique_lock resource_lock(resources->mutex);
+    auto* execution = resources->execution.get();
+    if (execution == nullptr || !execution->running || resources->lifecycle_phase != LifecyclePhase::Running) {
+        return std::nullopt;
+    }
+    return RunningExecution{.resources = std::move(resources), .lock = std::move(resource_lock), .execution = *execution};
+}
+
+// A run that has ended, or whose scheduler has left the running state, takes no settings and serves no stream.
+std::optional<Gr4RuntimeManager::RunningExecution> Gr4RuntimeManager::live_execution(const domain::Session& session) {
+    auto run = running_execution(session);
+    if (!run.has_value()) {
+        return std::nullopt;
+    }
+    using enum gr::Runtime::State;
+    const auto& runtime = *run->execution.runtime;
+    const auto state = runtime.state();
+    if (state == RequestedStop || state == Stopped || state == Error || runtime.waitFor(std::chrono::nanoseconds{0})) {
+        return std::nullopt;
+    }
+    return run;
+}
+
 Gr4RuntimeManager::Execution& Gr4RuntimeManager::prepare_locked(const domain::Session& session,
                                                                SessionRuntimeResources& resources) {
     if (resources.lifecycle_phase == LifecyclePhase::Stopping) {
@@ -995,8 +774,6 @@ Gr4RuntimeManager::Execution& Gr4RuntimeManager::prepare_locked(const domain::Se
     if (const auto contract_error = domain::validate_stream_runtime_contract(session); contract_error.has_value()) {
         throw runtime_error(session, "prepare", *contract_error);
     }
-
-    ensure_runtime_environment(plugin_directories_);
 
     release_stream_bindings_locked(resources);
     std::vector<domain::RuntimeStreamBinding> stream_bindings;
@@ -1022,13 +799,28 @@ Gr4RuntimeManager::Execution& Gr4RuntimeManager::prepare_locked(const domain::Se
 
     auto execution = std::make_unique<Execution>();
     try {
-        auto graph = gr::loadGrc(gr::globalPluginLoader(), normalize_graph_content(session.grc_content, stream_bindings));
-        const auto scheduler_alias = session.scheduler_alias.value_or(default_scheduler_alias());
-        execution->scheduler = gr::globalPluginLoader().instantiateScheduler(scheduler_alias);
-        if (!execution->scheduler) {
-            throw runtime_error(session, "prepare", "scheduler not found: " + scheduler_alias);
+        std::map<std::string, gr::property_map, std::less<>> overrides;
+        for (const auto& binding : stream_bindings) {
+            overrides[binding.plan.block_instance_name] = gr::property_map{
+                {"endpoint", binding.internal.endpoint},
+                {"transport", binding.plan.transport},
+            };
         }
-        execution->scheduler->setGraph(std::move(*graph));
+        auto graph = gr::RuntimeGraph::fromYaml(loader_, normalize_graph_content(session.grc_content), overrides);
+        if (!graph.has_value()) {
+            throw std::runtime_error(graph.error().message);
+        }
+        for (auto& block : graph->blocks(gr::RuntimeGraph::Recursive::Yes)) {
+            execution->blocks.emplace(std::string(block.uniqueName()), block);
+        }
+
+        const auto scheduler = session.scheduler_alias.has_value() ? core_scheduler_type(*session.scheduler_alias)
+                                                                   : default_scheduler_type(*loader_);
+        auto runtime = gr::Runtime::create(std::move(*graph), scheduler);
+        if (!runtime.has_value()) {
+            throw std::runtime_error(runtime.error().message);
+        }
+        execution->runtime.emplace(std::move(*runtime));
     } catch (const std::exception& error) {
         for (const auto& binding : stream_bindings) {
             stream_allocator_.release(binding.internal);
@@ -1052,9 +844,9 @@ void Gr4RuntimeManager::release_stream_bindings_locked(SessionRuntimeResources& 
     resources.stream_bindings.clear();
 }
 
-void Gr4RuntimeManager::stop_locked(const domain::Session& session,
-                                    SessionRuntimeResources& resources,
-                                    std::unique_lock<std::mutex>& lock) {
+std::optional<std::string> Gr4RuntimeManager::stop_locked(const domain::Session& session,
+                                                          SessionRuntimeResources& resources,
+                                                          std::unique_lock<std::mutex>& lock) {
     (void)lock;
 
     auto* execution = resources.execution.get();
@@ -1063,7 +855,7 @@ void Gr4RuntimeManager::stop_locked(const domain::Session& session,
         resources.lifecycle_phase = LifecyclePhase::Idle;
         resources.teardown_complete = true;
         resources.teardown_error.reset();
-        return;
+        return std::nullopt;
     }
 
     if (resources.lifecycle_phase == LifecyclePhase::Stopping) {
@@ -1074,30 +866,27 @@ void Gr4RuntimeManager::stop_locked(const domain::Session& session,
     resources.teardown_complete = false;
     resources.teardown_error.reset();
 
+    // A run that ended by itself, or whose scheduler entered its error state, stops with success, and its result goes
+    // back to the caller.
+    const bool ended_by_itself = execution->runtime->waitFor(std::chrono::nanoseconds{0}) ||
+                                 execution->runtime->state() == gr::Runtime::State::Error;
     if (execution->running) {
-        try {
-            execution->scheduler->stop();
-        } catch (const std::exception& error) {
-            resources.lifecycle_phase = LifecyclePhase::Failed;
-            resources.teardown_error = std::format("failed to stop scheduler: {}", error.what());
-            throw runtime_error(session, "stop", *resources.teardown_error);
-        }
+        execution->runtime->stop();
     }
+    const auto result = execution->runtime->result();
 
-    execution = resources.execution.get();
-    if (execution) {
-        execution->running = false;
-    }
+    execution->running = false;
     release_stream_bindings_locked(resources);
     resources.execution.reset();
     resources.teardown_complete = true;
-    if (resources.async_error.has_value()) {
+    if (!result.has_value() && !ended_by_itself) {
         resources.lifecycle_phase = LifecyclePhase::Failed;
-        resources.teardown_error = resources.async_error;
-        throw runtime_error(session, "execution", *resources.async_error);
+        resources.teardown_error = result.error().message;
+        throw runtime_error(session, "execution", *resources.teardown_error);
     }
     resources.lifecycle_phase = LifecyclePhase::Idle;
     resources.teardown_error.reset();
+    return result.has_value() ? std::nullopt : std::optional<std::string>(result.error().message);
 }
 
 }  // namespace gr4cp::runtime

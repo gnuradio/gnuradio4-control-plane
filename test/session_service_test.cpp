@@ -3,11 +3,13 @@
 #include <chrono>
 #include <condition_variable>
 #include <future>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -43,12 +45,13 @@ public:
         record("start");
     }
 
-    void stop(const gr4cp::domain::Session&) override {
+    std::optional<std::string> stop(const gr4cp::domain::Session&) override {
         record("stop");
         std::unique_lock lock(control_mutex_);
         stop_entered_ = true;
         control_condition_.notify_all();
         control_condition_.wait(lock, [this]() { return !block_stop_; });
+        return std::exchange(stop_run_error, std::nullopt);
     }
 
     void destroy(const gr4cp::domain::Session&) override {
@@ -85,6 +88,8 @@ public:
         return {};
     }
 
+    gr4cp::runtime::RunObservation observe(const gr4cp::domain::Session&) override { return std::exchange(observation, {}); }
+
     void fail_on(std::string action, std::string message = "boom") {
         fail_action_ = std::move(action);
         fail_message_ = std::move(message);
@@ -112,6 +117,8 @@ public:
     }
 
     std::vector<std::string> actions;
+    gr4cp::runtime::RunObservation observation;  // what the next observe() reports
+    std::optional<std::string> stop_run_error;   // what the next stop() reports
     gr4cp::runtime::HttpStreamResponse http_stream_response_{.status = 200,
                                                              .body = R"({"samples":[1,2,3]})",
                                                              .content_type = "application/json"};
@@ -304,6 +311,93 @@ TEST_F(SessionServiceTest, RemoveRunningSession) {
 
     EXPECT_FALSE(repository.get(created.id).has_value());
     EXPECT_EQ(runtime.actions, (std::vector<std::string>{"stop", "destroy"}));
+}
+
+TEST_F(SessionServiceTest, RunThatEndedWithAnErrorReadsError) {
+    const auto created = service.create("demo", "graph");
+    service.start(created.id);
+    runtime.observation = {.ended = true, .run_error = "the run failed"};
+
+    const auto read = service.get(created.id);
+
+    EXPECT_EQ(read.state, gr4cp::domain::SessionState::Error);
+    EXPECT_EQ(read.last_error, std::optional<std::string>("the run failed"));
+    EXPECT_EQ(service.list().front().state, gr4cp::domain::SessionState::Error);
+}
+
+TEST_F(SessionServiceTest, RemoveAndRestartReadAnEndedRunBeforeTheTeardown) {
+    const auto removed = service.create("removed", "graph");
+    service.start(removed.id);
+    runtime.fail_on("stop", "the run failed");
+    runtime.observation = {.ended = true, .run_error = "the run failed"};
+    runtime.actions.clear();
+
+    service.remove(removed.id);
+
+    EXPECT_FALSE(repository.get(removed.id).has_value());
+    EXPECT_EQ(runtime.actions, (std::vector<std::string>{"destroy"}));
+
+    const auto restarted = service.create("restarted", "graph");
+    service.start(restarted.id);
+    runtime.observation = {.ended = true, .run_error = "the run failed"};
+    runtime.actions.clear();
+
+    EXPECT_EQ(service.restart(restarted.id).state, gr4cp::domain::SessionState::Running);
+    EXPECT_EQ(runtime.actions, (std::vector<std::string>{"destroy", "prepare", "start"}));
+}
+
+TEST_F(SessionServiceTest, StartOfARunThatEndedUnreadStartsItAgain) {
+    const auto created = service.create("demo", "graph");
+    service.start(created.id);
+    runtime.observation = {.ended = true};
+    runtime.actions.clear();
+
+    EXPECT_EQ(service.start(created.id).state, gr4cp::domain::SessionState::Running);
+    EXPECT_EQ(runtime.actions, (std::vector<std::string>{"prepare", "start"}));
+}
+
+// The first run ended with its error before the stop read it. The second run's error comes back from the stop itself.
+TEST_F(SessionServiceTest, StopOfAFailedRunNobodyReadReportsTheRunsError) {
+    const auto ended = service.create("ended", "graph");
+    service.start(ended.id);
+    runtime.observation = {.ended = true, .run_error = "the run failed"};
+    runtime.actions.clear();
+
+    const auto stopped_after_its_end = service.stop(ended.id);
+
+    EXPECT_EQ(stopped_after_its_end.state, gr4cp::domain::SessionState::Error);
+    EXPECT_EQ(stopped_after_its_end.last_error, std::optional<std::string>("the run failed"));
+    EXPECT_TRUE(runtime.actions.empty());
+    EXPECT_EQ(service.get(ended.id).last_error, std::optional<std::string>("the run failed"));
+
+    const auto ending = service.create("ending", "graph");
+    service.start(ending.id);
+    runtime.stop_run_error = "the run failed as it stopped";
+    runtime.actions.clear();
+
+    const auto stopped_in_its_end = service.stop(ending.id);
+
+    EXPECT_EQ(stopped_in_its_end.state, gr4cp::domain::SessionState::Error);
+    EXPECT_EQ(stopped_in_its_end.last_error, std::optional<std::string>("the run failed as it stopped"));
+    EXPECT_EQ(runtime.actions, (std::vector<std::string>{"stop"}));
+    EXPECT_EQ(service.get(ending.id).state, gr4cp::domain::SessionState::Error);
+}
+
+TEST_F(SessionServiceTest, EndedRunIsDestroyedAfterTheServiceReleasesItsLock) {
+    const auto created = service.create("demo", "graph");
+    service.start(created.id);
+    std::future<void> other_read;
+    std::optional<bool> other_read_answered;
+    runtime.observation.ended = true;
+    runtime.observation.ended_run = std::shared_ptr<int>(new int{0}, [&](int* run) {
+        other_read = std::async(std::launch::async, [this] { (void)service.list(); });
+        other_read_answered = other_read.wait_for(std::chrono::seconds(1)) == std::future_status::ready;
+        delete run;
+    });
+
+    EXPECT_EQ(service.get(created.id).state, gr4cp::domain::SessionState::Stopped);
+    ASSERT_TRUE(other_read_answered.has_value());
+    EXPECT_TRUE(*other_read_answered);
 }
 
 TEST_F(SessionServiceTest, RuntimeFailureCausesErrorStateAndLastErrorToBeSet) {

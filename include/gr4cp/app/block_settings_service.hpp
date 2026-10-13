@@ -4,16 +4,11 @@
 
 #include <nlohmann/json.hpp>
 
+#include "gr4cp/app/session_service.hpp"
 #include "gr4cp/runtime/block_settings.hpp"
 #include "gr4cp/runtime/runtime_manager.hpp"
-#include "gr4cp/storage/session_repository.hpp"
 
 namespace gr4cp::app {
-
-class TimeoutError : public std::runtime_error {
-public:
-    using std::runtime_error::runtime_error;
-};
 
 struct BlockSettingsUpdateResult {
     std::string session_id;
@@ -26,7 +21,8 @@ class BlockSettingsService {
 public:
     using Json = nlohmann::json;
 
-    BlockSettingsService(storage::SessionRepository& repository, runtime::RuntimeManager& runtime_manager);
+    // Reads each session through `sessions`. A run that ended by itself then reads as not running.
+    BlockSettingsService(SessionService& sessions, runtime::RuntimeManager& runtime_manager);
 
     BlockSettingsUpdateResult update(const std::string& session_id,
                                      const std::string& block_unique_name,
@@ -35,14 +31,14 @@ public:
     Json get(const std::string& session_id, const std::string& block_unique_name);
 
 private:
-    domain::Session load_running_session_or_throw(const std::string& session_id) const;
+    domain::Session load_running_session_or_throw(const std::string& session_id);
 
     static gr::property_map json_to_property_map(const Json& value);
     static gr::pmt::Value json_to_pmt_value(const Json& value);
     static Json property_map_to_json(const gr::property_map& value);
     static Json pmt_value_to_json(const gr::pmt::Value& value);
 
-    storage::SessionRepository& repository_;
+    SessionService& sessions_;
     runtime::RuntimeManager& runtime_manager_;
 };
 

@@ -4,7 +4,9 @@
 #include "gr4cp/domain/session_stream.hpp"
 #include "gr4cp/runtime/block_settings.hpp"
 
+#include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 
 namespace gr4cp::runtime {
@@ -19,13 +21,28 @@ struct WebSocketStreamRoute {
     domain::InternalStreamBinding internal;
 };
 
+// A session has no run in progress, or its run is ending by itself.
+class SessionNotRunningError : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
+// What a read of a running session learns from its run since the previous read.
+struct RunObservation {
+    std::optional<std::string> last_error;  // the text of the last error a block reported
+    bool ended{false};                      // the run ended by itself
+    std::optional<std::string> run_error;   // the run's error when it ended with one
+    std::shared_ptr<void> ended_run;        // the ended run's graph and blocks, destroyed with the last copy
+};
+
 class RuntimeManager {
 public:
     virtual ~RuntimeManager() = default;
 
     virtual void prepare(const domain::Session& session) = 0;
     virtual void start(const domain::Session& session) = 0;
-    virtual void stop(const domain::Session& session) = 0;
+    // Stops the session's run. Returns the error of a run that ended by itself with one.
+    virtual std::optional<std::string> stop(const domain::Session& session) = 0;
     virtual void destroy(const domain::Session& session) = 0;
     virtual std::optional<domain::StreamRuntimePlan> active_stream_plan(const domain::Session& session) = 0;
     virtual HttpStreamResponse fetch_http_stream(const domain::Session& session, const std::string& stream_id) = 0;
@@ -36,6 +53,10 @@ public:
                                     BlockSettingsMode mode) = 0;
     virtual gr::property_map get_block_settings(const domain::Session& session,
                                                 const std::string& block_unique_name) = 0;
+    // Reports the errors the run's blocks raised since the last call and whether the run ended. An ended run's
+    // bindings go with `ended_run`, and the caller destroys it after releasing its own locks. Throws
+    // SessionNotRunningError when the session has no run in progress.
+    virtual RunObservation observe(const domain::Session& session) = 0;
 };
 
 }  // namespace gr4cp::runtime

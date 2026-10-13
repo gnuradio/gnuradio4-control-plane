@@ -19,8 +19,8 @@ if(DEFINED ENV{GR4CP_GNURADIO4_PREFIX})
     set(_gr4cp_default_gnuradio4_prefix "$ENV{GR4CP_GNURADIO4_PREFIX}")
 endif()
 set(GR4CP_GNURADIO4_PREFIX "${_gr4cp_default_gnuradio4_prefix}" CACHE PATH "Optional prefix containing gnuradio4Config.cmake; leave empty to use CMAKE_PREFIX_PATH/default package discovery")
-set(GR4CP_EXTRA_PLUGIN_DIRECTORIES "" CACHE STRING "Colon-separated plugin directories to search in addition to the ones under the gnuradio4 prefix, for a block library installed under its own prefix")
-set(GR4CP_PLUGIN_DIRECTORIES "" CACHE STRING "Colon-separated plugin directories that replace the ones derived from the gnuradio4 prefix; use it when only a subset of an installation should be loaded")
+set(GR4CP_EXTRA_PLUGIN_DIRECTORIES "" CACHE STRING "Colon-separated plugin directories to search in addition to the installation's plugin directory, for a block library installed under its own prefix")
+set(GR4CP_PLUGIN_DIRECTORIES "" CACHE STRING "Colon-separated plugin directories that replace the installation's plugin directory; use it when only a subset of an installation should be loaded")
 
 # Use ccache if found and enabled
 find_program(CCACHE_PROGRAM ccache)
@@ -167,6 +167,7 @@ add_library(gr4cp_core
     src/domain/session_stream.cpp
     src/app/session_service.cpp
     src/runtime/gr4_runtime_manager.cpp
+    src/runtime/plugin_loader.cpp
     src/runtime/stream_binding_allocator.cpp
     src/runtime/stub_runtime_manager.cpp
     src/storage/in_memory_session_repository.cpp
@@ -186,18 +187,12 @@ if(GR4CP_HAVE_GNURADIO4)
             src/catalog/gr4_block_catalog_provider.cpp
             src/catalog/gr4_scheduler_catalog_provider.cpp
     )
-    if(GR4CP_PLUGIN_DIRECTORIES)
-        set(_gr4cp_plugin_dirs "${GR4CP_PLUGIN_DIRECTORIES}")
-    else()
-        set(_gr4cp_plugin_dirs "${GR4CP_GNURADIO4_LIB_DIR}/gnuradio-4/plugins:${GR4CP_GNURADIO4_LIB_DIR}")
-    endif()
-    if(GR4CP_EXTRA_PLUGIN_DIRECTORIES)
-        set(_gr4cp_plugin_dirs "${_gr4cp_plugin_dirs}:${GR4CP_EXTRA_PLUGIN_DIRECTORIES}")
-    endif()
     target_compile_definitions(gr4cp_core
         PUBLIC
             GR4CP_HAVE_GNURADIO4
-            GR4CP_DEFAULT_GNURADIO4_PLUGIN_DIR="${_gr4cp_plugin_dirs}"
+        PRIVATE
+            GR4CP_PLUGIN_DIRECTORIES="${GR4CP_PLUGIN_DIRECTORIES}"
+            GR4CP_EXTRA_PLUGIN_DIRECTORIES="${GR4CP_EXTRA_PLUGIN_DIRECTORIES}"
     )
     set(GR4CP_GNURADIO4_TARGETS
         gnuradio4::gnuradio-core
@@ -209,9 +204,6 @@ if(GR4CP_HAVE_GNURADIO4)
     target_link_libraries(gr4cp_core
         PUBLIC
             ${GR4CP_GNURADIO4_TARGETS}
-    )
-    set(_gr4cp_test_env
-        "GNURADIO4_PLUGIN_DIRECTORIES=${_gr4cp_plugin_dirs}\;LD_LIBRARY_PATH=$<TARGET_FILE_DIR:gr4cp_core>:${GR4CP_GNURADIO4_LIB_DIR}"
     )
 endif()
 
@@ -378,12 +370,18 @@ if(NOT EMSCRIPTEN)
             Threads::Threads
     )
 
+    target_compile_definitions(gr4cp_smoke_test
+        PRIVATE
+            GR4CP_SERVER_EXECUTABLE="$<TARGET_FILE:gr4cp_server>"
+    )
+    add_dependencies(gr4cp_smoke_test gr4cp_server)
+
     include(GoogleTest)
-    if(GR4CP_HAVE_GNURADIO4)
-        gtest_discover_tests(gr4cp_smoke_test PROPERTIES ENVIRONMENT "${_gr4cp_test_env}")
-    else()
-        gtest_discover_tests(gr4cp_smoke_test)
-    endif()
+    gtest_discover_tests(gr4cp_smoke_test)
+
+    add_library(gr4cp_not_a_plugin MODULE
+        test/not_a_plugin.cpp
+    )
 
 
     add_executable(gr4cp_core_test
@@ -402,11 +400,13 @@ if(NOT EMSCRIPTEN)
             Threads::Threads
     )
 
-    if(GR4CP_HAVE_GNURADIO4)
-        gtest_discover_tests(gr4cp_core_test PROPERTIES ENVIRONMENT "${_gr4cp_test_env}")
-    else()
-        gtest_discover_tests(gr4cp_core_test)
-    endif()
+    target_compile_definitions(gr4cp_core_test
+        PRIVATE
+            GR4CP_NOT_A_PLUGIN_LIBRARY="$<TARGET_FILE:gr4cp_not_a_plugin>"
+    )
+    add_dependencies(gr4cp_core_test gr4cp_not_a_plugin)
+
+    gtest_discover_tests(gr4cp_core_test)
 
     add_executable(gr4cp_http_test
         test/http_api_test.cpp
@@ -420,11 +420,7 @@ if(NOT EMSCRIPTEN)
             Threads::Threads
     )
 
-    if(GR4CP_HAVE_GNURADIO4)
-        gtest_discover_tests(gr4cp_http_test PROPERTIES ENVIRONMENT "${_gr4cp_test_env}")
-    else()
-        gtest_discover_tests(gr4cp_http_test)
-    endif()
+    gtest_discover_tests(gr4cp_http_test)
 
     add_executable(gr4cp_cli_test
         test/cli_test.cpp
@@ -443,11 +439,7 @@ if(NOT EMSCRIPTEN)
             GR4CP_CLI_EXECUTABLE="$<TARGET_FILE:gr4cp_cli_exec>"
     )
 
-    if(GR4CP_HAVE_GNURADIO4)
-        gtest_discover_tests(gr4cp_cli_test PROPERTIES ENVIRONMENT "${_gr4cp_test_env}")
-    else()
-        gtest_discover_tests(gr4cp_cli_test)
-    endif()
+    gtest_discover_tests(gr4cp_cli_test)
 
 endif()
 endif()

@@ -35,7 +35,7 @@ The service is not a multi-tenant platform, graph editor, diagnostics system, pl
 - Zlib
 - pkg-config
 
-The production block catalog is GNU Radio 4-backed only. With the default `GR4CP_ENABLE_GR4_CATALOG=ON`, configuration requires a working `gnuradio4` package. Server startup also validates GNU Radio 4 plugin loading and catalog reflection before accepting requests. If initialization fails, the server exits instead of serving placeholder catalog data.
+The production block catalog is GNU Radio 4-backed only. With the default `GR4CP_ENABLE_GR4_CATALOG=ON`, configuration requires a working `gnuradio4` package. Server startup loads the plugins once, before it accepts requests. It searches the directories of `GNURADIO4_PLUGIN_DIRECTORIES`, then the installation's plugin directory, `gr::installedPluginDirectory()`. Two build options below replace or extend the installation's directory. The server exits with one line when no directory exists, a directory cannot be read, a plugin fails to load, no block is registered, or catalog reflection fails. It does not serve placeholder catalog data. A plugin directory holds plugins and block libraries only: a shared object there that is neither stops startup, and the line names the directory, the file and the loader's reason. A library directory such as `<prefix>/lib` therefore does not belong in `GNURADIO4_PLUGIN_DIRECTORIES`.
 
 ## Build And Test
 
@@ -57,8 +57,8 @@ Useful build options:
 
 - `GR4CP_ENABLE_GR4_CATALOG=ON`: require the GNU Radio 4-backed catalog provider, enabled by default
 - `GR4CP_SUPPRESS_IMPORTED_WERROR=ON`: strip inherited `-Werror` from imported GNU Radio 4 targets when needed
-- `GR4CP_EXTRA_PLUGIN_DIRECTORIES=<dir>[:<dir>...]`: plugin directories searched in addition to the ones under the gnuradio4 prefix
-- `GR4CP_PLUGIN_DIRECTORIES=<dir>[:<dir>...]`: plugin directories that replace the ones derived from the gnuradio4 prefix
+- `GR4CP_EXTRA_PLUGIN_DIRECTORIES=<dir>[:<dir>...]`: plugin directories searched in addition to the installation's plugin directory
+- `GR4CP_PLUGIN_DIRECTORIES=<dir>[:<dir>...]`: plugin directories that replace the installation's plugin directory
 - `USE_CCACHE=ON`: use ccache when available, enabled by default
 
 Built executables:
@@ -97,6 +97,10 @@ GR4CP_PORT=0 GR4CP_PORT_FILE=/tmp/gr4cp.port ./build/gr4cp_server
 ```
 
 `GR4CP_PORT_FILE` is only used when `GR4CP_PORT=0`.
+
+`./build/gr4cp_server --help` prints the environment variables the server reads
+and its plugin directories in search order, and exits without starting. The
+server takes no other argument.
 
 Temporary health check:
 
@@ -173,6 +177,8 @@ curl -X DELETE http://127.0.0.1:8080/sessions/<id>
 
 Session responses include `id`, `name`, `state`, `created_at`, `updated_at`, and `last_error`. A running session may also include runtime-derived stream descriptors when the submitted graph contains supported managed stream metadata.
 
+Each read of a running session checks its run. The last error a block reported becomes `last_error`. A graph that finished reads `stopped`, and a graph that failed reads `error` with the run's error. Starting, stopping, restarting or deleting a session whose run already ended succeeds. A stop of a run that failed answers with the session in `error` and the run's error.
+
 ## Runtime Stream Descriptors
 
 When a running session contains supported authored stream-export metadata, session responses may include a `streams` array. This is runtime-derived session metadata, not a separate stream-management API.
@@ -200,11 +206,12 @@ Behavior notes:
 - stored graph content is not rewritten when runtime bindings are derived.
 - authored endpoint values may remain in graph content, but runtime-owned bindings define the active session descriptor when supported stream metadata is present.
 - invalid supported stream metadata fails start or restart explicitly.
+- a stream route of a session whose graph is ending by itself returns a conflict error.
 - sessions without supported stream metadata omit `streams`.
 
 ## Live Block Settings
 
-Live block settings operate only on running sessions. Blocks are addressed by runtime `unique_name`.
+Live block settings operate only on running sessions. A block is addressed by its name, its unique name or its `name` setting, in that order.
 
 Apply a partial settings update:
 
@@ -214,7 +221,7 @@ curl -X POST http://127.0.0.1:8080/sessions/<id>/blocks/src0/settings \
   -d '{"frequency":1250.0,"amplitude":0.5}'
 ```
 
-By default, updates use the staged GR4 settings path. Use `mode=immediate` for the immediate GR4 property endpoint:
+Both modes stage the values on the block, which applies them at its next work call. `applied_via` names the mode, `staged_settings` by default and `settings` for `mode=immediate`:
 
 ```bash
 curl -X POST 'http://127.0.0.1:8080/sessions/<id>/blocks/src0/settings?mode=immediate' \
@@ -222,7 +229,7 @@ curl -X POST 'http://127.0.0.1:8080/sessions/<id>/blocks/src0/settings?mode=imme
   -d '{"frequency":1250.0}'
 ```
 
-Request bodies must be JSON objects. Supported values are `null`, boolean, integer, floating point, string, and nested object values. Arrays are rejected.
+Request bodies must be JSON objects. Supported values are `null`, boolean, integer, floating point, string, array, and nested object values. The block converts each array element to its setting's element type. An object with exactly the two numbers `real` and `imag` is a complex value. A read returns a list setting as an array and a complex value in the same two-number form.
 
 Successful updates return:
 
@@ -252,7 +259,7 @@ Response:
 }
 ```
 
-Stopped or errored sessions return a conflict error for this surface. The service does not fabricate settings from stored GRC content.
+Stopped or errored sessions, and a session whose graph is ending by itself, return a conflict error for this surface. The service does not fabricate settings from stored GRC content.
 
 ## Block Catalog
 
