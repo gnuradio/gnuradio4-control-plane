@@ -48,7 +48,7 @@ std::string continuous_graph_yaml() {
       amplitude: 1.0
       offset: 0.0
       phase: 0.0
-  - id: "gr::blocks::testing::NullSink<float32>"
+  - id: "gr::blocks::basic::NullSink<float32>"
     parameters:
       name: "sink0"
 connections:
@@ -63,13 +63,13 @@ std::string legacy_minimal_graph_json() {
   "blocks": [
     {
       "instance_name": "src0",
-      "block_type": "gr::blocks::testing::NullSource<float32>",
+      "block_type": "gr::blocks::basic::NullSource<float32>",
       "enabled": true,
       "raw_parameters": {}
     },
     {
       "instance_name": "sink0",
-      "block_type": "gr::blocks::testing::NullSink<float32>",
+      "block_type": "gr::blocks::basic::NullSink<float32>",
       "enabled": true,
       "raw_parameters": {}
     }
@@ -91,14 +91,14 @@ metadata:
   name: Untitled Graph
   description: ""
 blocks:
-  - id: "gr::blocks::testing::NullSink<float32>"
+  - id: "gr::blocks::basic::NullSink<float32>"
     parameters:
-      name: gr__testing__NullSink_float32__5
-  - id: "gr::blocks::testing::NullSource<float32>"
+      name: gr__basic__NullSink_float32__5
+  - id: "gr::blocks::basic::NullSource<float32>"
     parameters:
-      name: gr__testing__NullSource_float32__2
+      name: gr__basic__NullSource_float32__2
 connections:
-  - [gr__testing__NullSource_float32__2, out, gr__testing__NullSink_float32__5, in]
+  - [gr__basic__NullSource_float32__2, out, gr__basic__NullSink_float32__5, in]
 )";
 }
 
@@ -273,11 +273,11 @@ TEST_F(Gr4RuntimeManagerTest, CompatibilityStudioBlockNameResolvesForSettingsRou
       amplitude: 1.0
       offset: 0.0
       phase: 0.0
-  - id: "gr::blocks::testing::NullSink<float32>"
+  - id: "gr::blocks::basic::NullSink<float32>"
     parameters:
-      name: "gr__testing__NullSink_float32__1"
+      name: "gr__basic__NullSink_float32__1"
 connections:
-  - ["gr__basic__SignalGenerator_float32__1", 0, "gr__testing__NullSink_float32__1", 0]
+  - ["gr__basic__SignalGenerator_float32__1", 0, "gr__basic__NullSink_float32__1", 0]
 )");
 
     runtime_.prepare(session);

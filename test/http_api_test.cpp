@@ -225,7 +225,7 @@ std::string matrix_websocket_graph() {
 
 std::string unmanaged_graph() {
     return R"(blocks:
-  - id: "gr::blocks::testing::NullSink<float32>"
+  - id: "gr::blocks::basic::NullSink<float32>"
     parameters:
       name: "sink0"
 connections: []
@@ -260,7 +260,7 @@ std::string partially_broken_managed_graph() {
 
 std::string graph_without_stream_metadata() {
     return R"(blocks:
-  - id: "gr::blocks::testing::NullSink<float32>"
+  - id: "gr::blocks::basic::NullSink<float32>"
     parameters:
       name: "dataset0"
 connections: []
