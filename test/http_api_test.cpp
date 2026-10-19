@@ -289,9 +289,9 @@ std::string compatibility_studio_http_poll_graph() {
       stream:
         transport: "http_poll"
         payload_format: "series-window-json-v1"
-      poll_ms: 250
+      update_ms: 250
       window_size: 64
-      channels: 1
+      n_inputs: 1
 connections:
   - ["src0", "out", "series0", "in#0"]
 )";

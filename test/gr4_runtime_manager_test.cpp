@@ -120,9 +120,9 @@ std::string compatibility_studio_http_series_graph_yaml() {
       stream:
         transport: "http_poll"
         payload_format: "series-window-json-v1"
-      poll_ms: 250
+      update_ms: 250
       window_size: 64
-      channels: 1
+      n_inputs: 1
 connections:
   - ["src0", "out", "series0", "in#0"]
 )";
@@ -146,7 +146,7 @@ std::string compatibility_studio_http_waterfall_graph_yaml() {
       stream:
         transport: "http_poll"
         payload_format: "waterfall-spectrum-json-v1"
-      poll_ms: 250
+      update_ms: 250
       fft_size: 32
       sample_rate: 1000.0
       time_span: 0.256
