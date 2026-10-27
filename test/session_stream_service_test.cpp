@@ -66,7 +66,7 @@ void expect_single_stream(const gr4cp::domain::StreamRuntimePlan& plan,
 
 std::string unmanaged_graph() {
     return R"(blocks:
-  - id: "gr::blocks::testing::NullSink<float32>"
+  - id: "gr::blocks::basic::NullSink<float32>"
     parameters:
       name: "sink0"
 connections: []
