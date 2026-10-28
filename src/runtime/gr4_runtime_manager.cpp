@@ -521,6 +521,45 @@ bool normalize_connection(gr::pmt::Value& connection) {
     return true;
 }
 
+// The runtime's graph loader refuses a parameter the block does not declare; a key the control plane reads for itself
+// belongs under the block's meta_information, which the loader restores onto the block.
+bool move_parameter_to_meta_information(gr::property_map& block, gr::property_map& parameters, std::string_view name) {
+    const std::pmr::string key(name);
+    const auto it = parameters.find(key);
+    if (it == parameters.end()) {
+        return false;
+    }
+
+    gr::property_map meta_information;
+    if (const auto meta_it = block.find("meta_information"); meta_it != block.end()) {
+        if (const auto* existing = meta_it->second.get_if<gr::property_map>(); existing != nullptr) {
+            meta_information = *existing;
+        }
+    }
+    meta_information.insert_or_assign(key, it->second);
+    parameters.erase(it);
+    block["meta_information"] = meta_information;
+    return true;
+}
+
+bool move_stream_intent_to_meta_information(gr::property_map& block) {
+    const auto parameters_it = block.find("parameters");
+    if (parameters_it == block.end()) {
+        return false;
+    }
+    const auto* existing = parameters_it->second.get_if<gr::property_map>();
+    if (existing == nullptr) {
+        return false;
+    }
+
+    auto parameters = *existing;
+    if (!move_parameter_to_meta_information(block, parameters, "stream")) {
+        return false;
+    }
+    block["parameters"] = parameters;
+    return true;
+}
+
 bool inject_stream_bindings(gr::property_map& root, const std::vector<domain::RuntimeStreamBinding>& bindings) {
     if (bindings.empty()) {
         return false;
@@ -569,6 +608,8 @@ bool inject_stream_bindings(gr::property_map& root, const std::vector<domain::Ru
             }
             parameters["endpoint"] = binding.internal.endpoint;
             parameters["transport"] = binding.plan.transport;
+            move_parameter_to_meta_information(*block, parameters, "stream_id");
+            move_parameter_to_meta_information(*block, parameters, "payload_format");
             (*block)["parameters"] = parameters;
             injected_stream_ids.insert(binding.plan.stream_id);
             changed = true;
@@ -598,6 +639,7 @@ std::string normalize_graph_content(std::string_view content, const std::vector<
                 if (auto* block = block_value.get_if<gr::property_map>(); block != nullptr) {
                     const auto before = *block;
                     normalize_block(*block);
+                    move_stream_intent_to_meta_information(*block);
                     changed = changed || (*block != before);
                 }
             }
