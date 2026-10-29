@@ -289,9 +289,9 @@ std::string compatibility_studio_http_poll_graph() {
       stream:
         transport: "http_poll"
         payload_format: "series-window-json-v1"
-      poll_ms: 250
+      update_ms: 250
       window_size: 64
-      channels: 1
+      n_inputs: 1
 connections:
   - ["src0", "out", "series0", "in#0"]
 )";
@@ -946,6 +946,36 @@ TEST_F(RealRuntimeHttpApiTest, CompatibilityStudioSinkHttpRouteReachesRealRuntim
     EXPECT_TRUE(body["samples_per_channel"].get<int>() >= 0);
     ASSERT_TRUE(body["data"].is_array());
     ASSERT_FALSE(body["data"].empty());
+}
+
+TEST_F(RealRuntimeHttpApiTest, FlatStreamMetadataStartsComplexStudioSinkWithoutBecomingBlockSettings) {
+    constexpr std::string_view complex_sink = "gr::studio::StudioSeriesSink<complex<float32>>";
+    if (!block_is_registered(complex_sink)) {
+        GTEST_SKIP() << "block not registered: " << complex_sink;
+    }
+    auto graph = compatibility_studio_http_poll_graph();
+    const auto replace = [&](std::string_view before, std::string_view after) {
+        const auto position = graph.find(before);
+        ASSERT_NE(position, std::string::npos);
+        graph.replace(position, before.size(), after);
+    };
+    replace("SignalGenerator<float32>", "SignalGenerator<complex<float32>>");
+    replace("StudioSeriesSink<float32>", complex_sink.substr(std::string_view("gr::studio::").size()));
+    replace("      stream:\n        transport: \"http_poll\"\n        payload_format: \"series-window-json-v1\"",
+            "      stream_id: \"series0\"\n      transport: \"http_poll\"\n      payload_format: \"series-window-json-v1\"");
+    const auto created = create_session_with_graph(graph);
+    const auto id = created["id"].get<std::string>();
+    const auto started = client->Post(("/sessions/" + id + "/start").c_str(), "", "application/json");
+    ASSERT_TRUE(started);
+    ASSERT_EQ(started->status, 200) << started->body;
+    const auto detail = client->Get(("/sessions/" + id).c_str());
+    ASSERT_TRUE(detail);
+    const auto body = parse_json(detail);
+    ASSERT_EQ(body["streams"].size(), 1U);
+    EXPECT_EQ(body["streams"][0]["payload_format"], "series-window-json-v1");
+    const auto stream = client->Get(("/sessions/" + id + "/streams/series0/http").c_str());
+    ASSERT_TRUE(stream);
+    EXPECT_EQ(stream->status, 200);
 }
 
 TEST_F(RealRuntimeHttpApiTest, CompatibilityStudioSinkStopRemovesBrowserRoute) {
