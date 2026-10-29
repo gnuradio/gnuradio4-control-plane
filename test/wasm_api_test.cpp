@@ -2,6 +2,7 @@
 #include "gr4cp/api/wasm_api.hpp"
 
 #include <regex>
+#include <string_view>
 #include <thread>
 
 #include <gtest/gtest.h>
@@ -76,6 +77,7 @@ TEST_F(WasmApiTest, HealthAndEverySessionResponseShareHttpIdentityAndSerializati
     const auto created = api.dispatch("POST", "/sessions", R"({"name":"identity-check","grc":"graph"})");
     ASSERT_EQ(created.status, 201);
     auto session = Json::parse(created.body);
+    EXPECT_FALSE(session.contains("completion_reason"));
     const auto id = session.at("id").get<std::string>();
     const auto path = "/sessions/" + id;
     EXPECT_EQ(session.at("server_instance_id"), health.at("server_instance_id"));
@@ -99,6 +101,11 @@ TEST_F(WasmApiTest, HealthAndEverySessionResponseShareHttpIdentityAndSerializati
         ASSERT_EQ(response.status, 200) << response.body;
         session = Json::parse(response.body);
         EXPECT_EQ(session.at("server_instance_id"), health.at("server_instance_id"));
+        const bool stopped = std::string_view(action) == "stop";
+        EXPECT_EQ(session.contains("completion_reason"), stopped);
+        if (stopped) {
+            EXPECT_EQ(session.at("completion_reason"), "stopped");
+        }
         expect_matching_session();
     }
 }

@@ -139,9 +139,9 @@ domain::Session SessionService::start(const std::string& id) {
         runtime_manager_.prepare(session);
         runtime_manager_.start(session);
     } catch (const std::exception& error) {
-        record_runtime_failure(std::move(session), runtime_message("start", id, error));
+        record_runtime_failure(std::move(session), runtime_message("start", id, error), std::nullopt);
     } catch (...) {
-        record_runtime_failure(std::move(session), runtime_message("start", id));
+        record_runtime_failure(std::move(session), runtime_message("start", id), std::nullopt);
     }
 
     {
@@ -149,6 +149,7 @@ domain::Session SessionService::start(const std::string& id) {
         session = load_or_throw(id);
         session.state = domain::SessionState::Running;
         session.last_error.reset();
+        session.completion_reason.reset();
         session.updated_at = now_utc();
         store_session_locked(session, InternalLifecyclePhase::Running);
         return session;
@@ -184,9 +185,11 @@ domain::Session SessionService::stop(const std::string& id) {
     try {
         run_error = runtime_manager_.stop(session);
     } catch (const std::exception& error) {
-        record_runtime_failure(std::move(session), runtime_message("stop", id, error), InternalLifecyclePhase::RunFailed);
+        record_runtime_failure(std::move(session), runtime_message("stop", id, error), domain::CompletionReason::Error,
+                               InternalLifecyclePhase::RunFailed);
     } catch (...) {
-        record_runtime_failure(std::move(session), runtime_message("stop", id), InternalLifecyclePhase::RunFailed);
+        record_runtime_failure(std::move(session), runtime_message("stop", id), domain::CompletionReason::Error,
+                               InternalLifecyclePhase::RunFailed);
     }
 
     {
@@ -194,6 +197,7 @@ domain::Session SessionService::stop(const std::string& id) {
         session = load_or_throw(id);
         session.state = run_error.has_value() ? domain::SessionState::Error : domain::SessionState::Stopped;
         session.last_error = run_error;
+        session.completion_reason = run_error.has_value() ? domain::CompletionReason::Error : domain::CompletionReason::Stopped;
         session.updated_at = now_utc();
         store_session_locked(session, run_error.has_value() ? InternalLifecyclePhase::RunFailed : InternalLifecyclePhase::Idle);
         return session;
@@ -228,9 +232,9 @@ domain::Session SessionService::restart(const std::string& id) {
         runtime_manager_.prepare(session);
         runtime_manager_.start(session);
     } catch (const std::exception& error) {
-        record_runtime_failure(std::move(session), runtime_message("restart", id, error));
+        record_runtime_failure(std::move(session), runtime_message("restart", id, error), std::nullopt);
     } catch (...) {
-        record_runtime_failure(std::move(session), runtime_message("restart", id));
+        record_runtime_failure(std::move(session), runtime_message("restart", id), std::nullopt);
     }
 
     {
@@ -238,6 +242,7 @@ domain::Session SessionService::restart(const std::string& id) {
         session = load_or_throw(id);
         session.state = domain::SessionState::Running;
         session.last_error.reset();
+        session.completion_reason.reset();
         session.updated_at = now_utc();
         store_session_locked(session, InternalLifecyclePhase::Running);
         return session;
@@ -270,9 +275,9 @@ void SessionService::remove(const std::string& id) {
         }
         runtime_manager_.destroy(session);
     } catch (const std::exception& error) {
-        record_runtime_failure(std::move(session), runtime_message("remove", id, error));
+        record_runtime_failure(std::move(session), runtime_message("remove", id, error), domain::CompletionReason::Error);
     } catch (...) {
-        record_runtime_failure(std::move(session), runtime_message("remove", id));
+        record_runtime_failure(std::move(session), runtime_message("remove", id), domain::CompletionReason::Error);
     }
 
     {
@@ -378,9 +383,11 @@ domain::Session SessionService::observe_locked(domain::Session session, std::vec
     if (observation.ended && observation.run_error.has_value()) {
         session.state = domain::SessionState::Error;
         session.last_error = observation.run_error;
+        session.completion_reason = domain::CompletionReason::Error;
         phase = InternalLifecyclePhase::RunFailed;
     } else if (observation.ended) {
         session.state = domain::SessionState::Stopped;
+        session.completion_reason = domain::CompletionReason::Completed;
         phase = InternalLifecyclePhase::Idle;
     }
     session.updated_at = now_utc();
@@ -398,11 +405,13 @@ domain::Session SessionService::load_or_throw(const std::string& id) {
 
 [[noreturn]] void SessionService::record_runtime_failure(domain::Session session,
                                                          const std::string& message,
+                                                         std::optional<domain::CompletionReason> reason,
                                                          const InternalLifecyclePhase phase) {
     std::lock_guard lock(mutex_);
     session = load_or_throw(session.id);
     session.state = domain::SessionState::Error;
     session.last_error = message;
+    session.completion_reason = reason;
     session.updated_at = now_utc();
     store_session_locked(session, phase);
     throw RuntimeError(message);

@@ -71,9 +71,11 @@ private:
     domain::Session load_or_throw(const std::string& id);
     void store_session_locked(const domain::Session& session, InternalLifecyclePhase phase);
     void erase_phase_locked(const std::string& id);
-    // Records the session in error with `message`, in `phase`. Throws RuntimeError with `message`.
+    // Records the session in error with `message` in `phase`, with `reason` as its completion reason: an error for a
+    // stop or a removal that failed, none for a start or a restart that failed. Throws RuntimeError with `message`.
     [[noreturn]] void record_runtime_failure(domain::Session session,
                                              const std::string& message,
+                                             std::optional<domain::CompletionReason> reason,
                                              InternalLifecyclePhase phase = InternalLifecyclePhase::Failed);
 
     storage::SessionRepository& repository_;
