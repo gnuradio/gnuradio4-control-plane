@@ -7,8 +7,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <complex>
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -99,6 +102,78 @@ struct BoundStreamSink : gr::Block<BoundStreamSink> {
     void processOne(float) const noexcept {}
 };
 
+// A hold on the destructor of HeldTeardownSource. Once armed, the next destructor waits until release() or ten seconds
+// have passed.
+class TeardownHold {
+public:
+    static void arm() {
+        std::lock_guard lock(mutex_);
+        armed_ = true;
+        entered_ = false;
+        released_ = false;
+    }
+
+    // Returns whether a destructor entered the hold within `timeout`.
+    static bool wait_until_entered(std::chrono::milliseconds timeout) {
+        std::unique_lock lock(mutex_);
+        return changed_.wait_for(lock, timeout, [] { return entered_; });
+    }
+
+    // Returns whether a destructor waits in the hold.
+    static bool holding() {
+        std::lock_guard lock(mutex_);
+        return entered_ && !released_;
+    }
+
+    static void release() {
+        std::lock_guard lock(mutex_);
+        released_ = true;
+        changed_.notify_all();
+    }
+
+    static void enter() {
+        std::unique_lock lock(mutex_);
+        if (!std::exchange(armed_, false)) {
+            return;
+        }
+        entered_ = true;
+        changed_.notify_all();
+        changed_.wait_for(lock, std::chrono::seconds(10), [] { return released_; });
+        released_ = true;
+    }
+
+private:
+    static inline std::mutex mutex_;
+    static inline std::condition_variable changed_;
+    static inline bool armed_ = false;
+    static inline bool entered_ = false;
+    static inline bool released_ = false;
+};
+
+// Produces `n_samples` zeros and ends. Its destructor enters the TeardownHold.
+struct HeldTeardownSource : gr::Block<HeldTeardownSource> {
+    gr::PortOut<float> out;
+    gr::Size_t n_samples = 64U;
+
+    GR_MAKE_REFLECTABLE(HeldTeardownSource, out, n_samples);
+
+    explicit HeldTeardownSource(gr::property_map init = {}) : gr::Block<HeldTeardownSource>(std::move(init)) {}
+    HeldTeardownSource(const HeldTeardownSource&) = delete;
+    HeldTeardownSource& operator=(const HeldTeardownSource&) = delete;
+    ~HeldTeardownSource() { TeardownHold::enter(); }
+
+    gr::work::Status processBulk(gr::OutputSpanLike auto& outSpan) {
+        const auto n = std::min<std::size_t>(outSpan.size(), n_samples - produced_);
+        std::fill_n(outSpan.begin(), n, 0.0F);
+        outSpan.publish(n);
+        produced_ += static_cast<gr::Size_t>(n);
+        return produced_ >= n_samples ? gr::work::Status::DONE : gr::work::Status::OK;
+    }
+
+private:
+    gr::Size_t produced_ = 0U;
+};
+
 // Counts the live objects that hold it as a member. Every holder shares the one count.
 class LiveInstances {
 public:
@@ -163,6 +238,7 @@ inline void register_test_blocks() {
                registry.insert<StreamEndpointSink>("=gr4cp::test::StreamEndpointSink") &&
                registry.insert<BoundStreamSink>("=gr4cp::test::BoundStreamSink") &&
                registry.insert<CountedSource>("=gr4cp::test::CountedSource") &&
+               registry.insert<HeldTeardownSource>("=gr4cp::test::HeldTeardownSource") &&
                registry.insert<VectorSettingsSource>("=gr4cp::test::VectorSettingsSource");
     }();
     ASSERT_TRUE(registered);

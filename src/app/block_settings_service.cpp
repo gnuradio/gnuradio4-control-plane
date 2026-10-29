@@ -85,7 +85,7 @@ BlockSettingsUpdateResult BlockSettingsService::update(const std::string& sessio
 
 BlockSettingsService::Json BlockSettingsService::get(const std::string& session_id,
                                                      const std::string& block_unique_name) {
-    const auto session = load_running_session_or_throw(session_id);
+    const auto session = sessions_.get(session_id);
 
     try {
         return property_map_to_json(runtime_manager_.get_block_settings(session, block_unique_name));

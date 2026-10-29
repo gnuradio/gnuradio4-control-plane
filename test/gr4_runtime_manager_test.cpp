@@ -20,10 +20,12 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <format>
+#include <future>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -69,15 +71,16 @@ gr::property_map read_setting_until(gr4cp::runtime::Gr4RuntimeManager& runtime,
     return settings;
 }
 
-// Polls a settings read of `block` until the runtime manager throws SessionNotRunningError, for up to ten seconds, and
-// returns whether it threw. No observe() call runs, and the ended run stays with the manager.
+// Polls an empty settings update of `block` until the runtime manager throws SessionNotRunningError, for up to ten
+// seconds, and returns whether it threw. An update refuses a run that is ending. No observe() call runs, and the ended
+// run stays with the manager.
 bool wait_until_run_is_ending(gr4cp::runtime::Gr4RuntimeManager& runtime,
                               const gr4cp::domain::Session& session,
                               const std::string& block) {
     const auto deadline = std::chrono::steady_clock::now() + 10s;
     while (std::chrono::steady_clock::now() < deadline) {
         try {
-            (void)runtime.get_block_settings(session, block);
+            runtime.set_block_settings(session, block, {}, gr4cp::runtime::BlockSettingsMode::Staged);
         } catch (const gr4cp::runtime::SessionNotRunningError&) {
             return true;
         }
@@ -368,26 +371,34 @@ TEST_F(Gr4RuntimeManagerTest, CompatibilityStudioInlineGraphShapeIsNormalizedBef
     EXPECT_NO_THROW(runtime_.destroy(session));
 }
 
+// Settings set and read three times in each of two runs of one session. A read polls: a staged value applies at the
+// block's next work call. After the stop, the read answers with the values the run left.
 TEST_F(Gr4RuntimeManagerTest, RunningSessionSupportsBlockSettingsMessageRoundTrip) {
     auto session = make_session("runtime_block_settings", continuous_graph_yaml());
 
-    runtime_.prepare(session);
-    runtime_.start(session);
-    std::this_thread::sleep_for(100ms);
+    for (int run = 0; run < 2; ++run) {
+        runtime_.prepare(session);
+        runtime_.start(session);
 
-    EXPECT_NO_THROW(runtime_.set_block_settings(
-        session,
-        "src0",
-        gr::property_map{{"tone_frequency", 1250.0}, {"amplitude", 0.5}},
-        gr4cp::runtime::BlockSettingsMode::Staged));
+        float last_frequency = 0.0F;
+        for (const float frequency : {1250.0F, 1300.0F, 1350.0F}) {
+            ASSERT_NO_THROW(runtime_.set_block_settings(session,
+                                                        "src0",
+                                                        gr::property_map{{"tone_frequency", frequency}, {"amplitude", 0.5}},
+                                                        gr4cp::runtime::BlockSettingsMode::Staged))
+                << run;
 
-    const auto settings = read_setting_until(runtime_, session, "src0", "tone_frequency", 1250.0F);
-    ASSERT_TRUE(settings.contains("tone_frequency"));
-    ASSERT_TRUE(settings.contains("amplitude"));
-    EXPECT_EQ(settings.at("tone_frequency").value_or(0.0F), 1250.0F);
-    EXPECT_EQ(settings.at("amplitude").value_or(0.0F), 0.5F);
+            const auto settings = read_setting_until(runtime_, session, "src0", "tone_frequency", frequency);
+            ASSERT_TRUE(settings.contains("tone_frequency")) << run;
+            ASSERT_TRUE(settings.contains("amplitude")) << run;
+            EXPECT_EQ(settings.at("tone_frequency").value_or(0.0F), frequency) << run;
+            EXPECT_EQ(settings.at("amplitude").value_or(0.0F), 0.5F) << run;
+            last_frequency = frequency;
+        }
 
-    runtime_.stop(session);
+        runtime_.stop(session);
+        EXPECT_EQ(runtime_.get_block_settings(session, "src0").at("tone_frequency").value_or(0.0F), last_frequency) << run;
+    }
     runtime_.destroy(session);
 }
 
@@ -748,6 +759,79 @@ connections:
     session = read_until(service, created.id, [](const auto& read) { return read.state != gr4cp::domain::SessionState::Running; });
     EXPECT_EQ(session.state, gr4cp::domain::SessionState::Stopped);
     service.remove(created.id);
+}
+
+// A settings read after the run ended answers with the values the run left, here the count of samples the sink took,
+// until the session runs again. A deleted session's blocks answer no read.
+TEST_F(Gr4RuntimeManagerTest, SettingsReadAfterTheRunEndsAnswersWithTheRunsFinalValues) {
+    gr4cp::test::register_test_blocks();
+    gr4cp::storage::InMemorySessionRepository repository;
+    gr4cp::app::SessionService service(repository, runtime_);
+    constexpr std::uint64_t n_samples = 1000U;
+    const auto created = service.create("final_settings", std::format(R"(blocks:
+  - id: "gr4cp::test::FiniteSource"
+    parameters:
+      name: "finite0"
+      n_samples: {}
+  - id: "gr::blocks::testing::CountingSink<float32>"
+    parameters:
+      name: "count0"
+connections:
+  - ["finite0", 0, "count0", 0]
+)",
+                                                                      n_samples));
+
+    for (int run = 0; run < 2; ++run) {
+        EXPECT_EQ(service.start(created.id).state, gr4cp::domain::SessionState::Running) << run;
+        const auto session = read_until(service, created.id, [](const auto& read) {
+            return read.state != gr4cp::domain::SessionState::Running;
+        });
+        ASSERT_EQ(session.state, gr4cp::domain::SessionState::Stopped) << run;
+
+        const auto settings = runtime_.get_block_settings(session, "count0");
+        ASSERT_TRUE(settings.contains("count")) << run;
+        EXPECT_EQ(settings.at("count").value_or(std::uint64_t{0}), n_samples) << run;
+    }
+
+    const auto session = service.get(created.id);
+    service.remove(created.id);
+    EXPECT_THROW((void)runtime_.get_block_settings(session, "count0"), gr4cp::runtime::SessionNotRunningError);
+}
+
+// The blocks of an ended run go when the session is deleted, and the service holds no lock meanwhile: while a block's
+// destructor waits, a list of the sessions answers.
+TEST_F(Gr4RuntimeManagerTest, BlockTeardownOnDeleteHoldsUpNoOtherRequest) {
+    gr4cp::test::register_test_blocks();
+    gr4cp::storage::InMemorySessionRepository repository;
+    gr4cp::app::SessionService service(repository, runtime_);
+    std::ignore = service.create("other", continuous_graph_yaml());
+    const auto created = service.create("held", R"(blocks:
+  - id: "gr4cp::test::HeldTeardownSource"
+    parameters:
+      name: "held0"
+  - id: "gr::blocks::basic::NullSink<float32>"
+    parameters:
+      name: "sink0"
+connections:
+  - ["held0", 0, "sink0", 0]
+)");
+    service.start(created.id);
+    ASSERT_EQ(read_until(service, created.id, [](const auto& read) {
+                  return read.state != gr4cp::domain::SessionState::Running;
+              }).state,
+              gr4cp::domain::SessionState::Stopped);
+
+    gr4cp::test::TeardownHold::arm();
+    auto removal = std::async(std::launch::async, [&service, &created] { service.remove(created.id); });
+    ASSERT_TRUE(gr4cp::test::TeardownHold::wait_until_entered(10s));
+    const auto listed = service.list();
+    const bool answered_while_held = gr4cp::test::TeardownHold::holding();
+    gr4cp::test::TeardownHold::release();
+    removal.get();
+
+    EXPECT_TRUE(answered_while_held);
+    EXPECT_EQ(listed.size(), 2U);
+    EXPECT_EQ(service.list().size(), 1U);
 }
 
 TEST_F(Gr4RuntimeManagerTest, NameTwoBlocksCarryIsRefusedWithTheCandidates) {

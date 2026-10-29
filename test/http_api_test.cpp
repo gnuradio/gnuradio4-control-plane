@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
+#include <format>
 #include <fstream>
 #include <iomanip>
 #include <future>
@@ -561,7 +562,7 @@ protected:
                 }
             }
         }
-        void start(const gr4cp::domain::Session&) override {}
+        void start(const gr4cp::domain::Session& session) override { started.insert(session.id); }
         std::optional<std::string> stop(const gr4cp::domain::Session& session) override {
             {
                 std::lock_guard lock(control_mutex_);
@@ -580,6 +581,7 @@ protected:
         void destroy(const gr4cp::domain::Session& session) override {
             release_streams(session.id);
             settings.erase(session.id);
+            started.erase(session.id);
         }
 
         std::optional<gr4cp::domain::StreamRuntimePlan> active_stream_plan(const gr4cp::domain::Session& session) override {
@@ -654,11 +656,15 @@ protected:
             if (get_exception) {
                 std::rethrow_exception(get_exception);
             }
+            if (!started.contains(session.id)) {
+                throw gr4cp::runtime::SessionNotRunningError("session runtime is not running");
+            }
             return settings[session.id][block_unique_name];
         }
 
         gr4cp::runtime::RunObservation observe(const gr4cp::domain::Session&) override { return {}; }
 
+        std::unordered_set<std::string> started;  // sessions with a run in progress or an ended run, whose settings answer reads
         int set_calls{};
         int get_calls{};
         std::string last_session_id;
@@ -939,15 +945,16 @@ protected:
         return parse_json(response);
     }
 
-    // Returns true when a settings read of `block` through the runtime manager fails as not running within ten seconds.
-    // The session service reads nothing meanwhile, and the session still reads running.
+    // Returns true when an empty settings update of `block` through the runtime manager fails as not running within ten
+    // seconds, as it does for a run that is ending. The session service reads nothing meanwhile, and the session still
+    // reads running.
     bool wait_until_run_is_ending(const std::string& id, const std::string& block) {
         gr4cp::domain::Session session;
         session.id = id;
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
         while (std::chrono::steady_clock::now() < deadline) {
             try {
-                (void)runtime_manager.get_block_settings(session, block);
+                runtime_manager.set_block_settings(session, block, {}, gr4cp::runtime::BlockSettingsMode::Staged);
             } catch (const gr4cp::runtime::SessionNotRunningError&) {
                 return true;
             }
@@ -1138,6 +1145,47 @@ connections:
         state = parse_json(read)["state"].get<std::string>();
     } while (state == "running" && std::chrono::steady_clock::now() < deadline);
     EXPECT_EQ(state, "stopped");
+}
+
+// A settings read of a run that ended by itself, with no session read between, answers 200 with the values the run
+// left: the sink counted every sample the source produced.
+TEST_F(RealRuntimeHttpApiTest, SettingsReadOfAFiniteRunThatEndedAnswersWithItsFinalValues) {
+    gr4cp::test::register_test_blocks();
+    constexpr std::uint64_t n_samples = 1000U;
+    const auto created = create_session_with_graph(std::format(R"(blocks:
+  - id: "gr4cp::test::FiniteSource"
+    parameters:
+      name: "finite0"
+      n_samples: {}
+  - id: "gr::blocks::testing::CountingSink<float32>"
+    parameters:
+      name: "count0"
+connections:
+  - ["finite0", 0, "count0", 0]
+)",
+                                                               n_samples));
+    const auto id = created["id"].get<std::string>();
+    const auto started = client->Post(("/sessions/" + id + "/start").c_str(), "", "application/json");
+    ASSERT_TRUE(started);
+    ASSERT_EQ(started->status, 200);
+    ASSERT_TRUE(wait_until_run_is_ending(id, "count0"));
+
+    // A run that is stopping has no final values yet, and its read answers 409 until the run has ended.
+    int status = 0;
+    nlohmann::json body;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    do {
+        const auto read = client->Get(("/sessions/" + id + "/blocks/count0/settings").c_str());
+        ASSERT_TRUE(read);
+        status = read->status;
+        body = parse_json(read);
+    } while (status == 409 && std::chrono::steady_clock::now() < deadline);
+    ASSERT_EQ(status, 200) << body.dump();
+    EXPECT_EQ(body["settings"]["count"], n_samples) << body.dump();
+
+    const auto session = client->Get(("/sessions/" + id).c_str());
+    ASSERT_TRUE(session);
+    EXPECT_EQ(parse_json(session)["state"], "stopped");
 }
 
 TEST_F(RealRuntimeHttpApiTest, StopOfARunThatFailedUnreadAnswersWithTheRunsError) {
@@ -1362,6 +1410,15 @@ TEST_F(RealRuntimeHttpApiTest, VectorAndComplexSettingsReadAsArraysAndParts) {
     EXPECT_EQ(settings["antennas"], nlohmann::json::parse(R"(["RX", "TX"])")) << settings.dump();
     EXPECT_EQ(settings["correction"], nlohmann::json::parse(R"({"real": 1.0, "imag": -0.5})")) << settings.dump();
     EXPECT_EQ(settings["taps"], nlohmann::json::parse(R"([{"real": 1.0, "imag": 0.0}])")) << settings.dump();
+
+    // the read of the stopped run's final values holds the same keys and values in the same form
+    const auto stopped = client->Post(("/sessions/" + id + "/stop").c_str(), "", "application/json");
+    ASSERT_TRUE(stopped);
+    ASSERT_EQ(stopped->status, 200);
+    const auto final_read = client->Get(("/sessions/" + id + "/blocks/vector0/settings").c_str());
+    ASSERT_TRUE(final_read);
+    ASSERT_EQ(final_read->status, 200) << final_read->body;
+    EXPECT_EQ(parse_json(final_read)["settings"], settings);
 }
 
 TEST_F(RealRuntimeHttpApiTest, VectorAndComplexSettingsPatchApplies) {
@@ -2854,7 +2911,7 @@ TEST_F(HttpApiTest, PostBlockSettingsOnStoppedSessionReturnsConflict) {
     EXPECT_EQ(parse_json(response)["error"]["code"], "invalid_state");
 }
 
-TEST_F(HttpApiTest, GetBlockSettingsOnStoppedSessionReturnsConflict) {
+TEST_F(HttpApiTest, GetBlockSettingsOfASessionThatHasNotRunReturnsConflict) {
     const auto created = create_session_via_api();
 
     const auto response = client->Get(("/sessions/" + created["id"].get<std::string>() + "/blocks/sig0/settings").c_str());

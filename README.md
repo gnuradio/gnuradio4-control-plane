@@ -211,7 +211,7 @@ Behavior notes:
 
 ## Live Block Settings
 
-Live block settings operate only on running sessions. A block is addressed by its name, its unique name or its `name` setting, in that order.
+Settings updates operate only on running sessions. A settings read of a session whose run has ended, by itself or by a stop, answers with the settings the run left, until the session starts again or is deleted. A block is addressed by its name, its unique name or its `name` setting, in that order.
 
 Apply a partial settings update:
 
@@ -259,7 +259,7 @@ Response:
 }
 ```
 
-Stopped or errored sessions, and a session whose graph is ending by itself, return a conflict error for this surface. The service does not fabricate settings from stored GRC content.
+An update of a stopped or errored session, or of a session whose graph is ending by itself, returns a conflict error. So does a read of a session that has not run, or whose run is stopping. The service does not fabricate settings from stored GRC content.
 
 ## Block Catalog
 

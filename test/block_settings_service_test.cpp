@@ -169,6 +169,17 @@ TEST_F(BlockSettingsServiceTest, UpdateFailsWhenSessionNotRunning) {
                  gr4cp::app::InvalidStateError);
 }
 
+TEST_F(BlockSettingsServiceTest, GetOfAStoppedSessionAnswersWithTheEndedRunsSettings) {
+    const auto session = create_session(gr4cp::domain::SessionState::Stopped);
+    runtime.settings[session.id]["count0"] = gr::property_map{{"n_samples_max", std::uint64_t{0}}, {"done", true}};
+
+    const auto result = service.get(session.id, "count0");
+
+    EXPECT_EQ(runtime.last_block, "count0");
+    EXPECT_EQ(result["done"], true);
+    EXPECT_EQ(result.size(), 2U);
+}
+
 TEST_F(BlockSettingsServiceTest, RunEndingByItselfMapsToInvalidState) {
     const auto session = create_session(gr4cp::domain::SessionState::Running);
     runtime.set_exception = std::make_exception_ptr(gr4cp::runtime::SessionNotRunningError("session runtime is not running"));
