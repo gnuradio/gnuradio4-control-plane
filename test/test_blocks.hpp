@@ -7,8 +7,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <complex>
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -85,6 +89,45 @@ struct StreamEndpointSink : gr::Block<StreamEndpointSink> {
     void processOne(float) const noexcept {}
 };
 
+// Consumes float samples and declares `transport` and `endpoint`, the two settings a stream binding writes, and no
+// other stream key. Its `start()` keeps a copy of the block's meta_information.
+struct BoundStreamSink : gr::Block<BoundStreamSink> {
+    gr::PortIn<float> in;
+    std::string transport;
+    std::string endpoint;
+
+    GR_MAKE_REFLECTABLE(BoundStreamSink, in, transport, endpoint);
+
+    explicit BoundStreamSink(gr::property_map init = {}) : gr::Block<BoundStreamSink>(std::move(init)) {}
+
+    void start() {
+        std::lock_guard lock(started_mutex_);
+        started_meta_information_ = this->meta_information.value;
+        started_changed_.notify_all();
+    }
+
+    void processOne(float) const noexcept {}
+
+    // Drops the copy an earlier start kept.
+    static void forget_started() {
+        std::lock_guard lock(started_mutex_);
+        started_meta_information_.reset();
+    }
+
+    // Returns the meta_information of the block that started last, after waiting up to `timeout` for a start. Returns
+    // nothing when no block started since forget_started().
+    static std::optional<gr::property_map> wait_until_started(std::chrono::milliseconds timeout) {
+        std::unique_lock lock(started_mutex_);
+        started_changed_.wait_for(lock, timeout, [] { return started_meta_information_.has_value(); });
+        return started_meta_information_;
+    }
+
+private:
+    static inline std::mutex started_mutex_;
+    static inline std::condition_variable started_changed_;
+    static inline std::optional<gr::property_map> started_meta_information_;
+};
+
 // Counts the live objects that hold it as a member. Every holder shares the one count.
 class LiveInstances {
 public:
@@ -147,6 +190,7 @@ inline void register_test_blocks() {
                registry.insert<FaultReportingSource>("=gr4cp::test::FaultReportingSource") &&
                registry.insert<FailingSource>("=gr4cp::test::FailingSource") &&
                registry.insert<StreamEndpointSink>("=gr4cp::test::StreamEndpointSink") &&
+               registry.insert<BoundStreamSink>("=gr4cp::test::BoundStreamSink") &&
                registry.insert<CountedSource>("=gr4cp::test::CountedSource") &&
                registry.insert<VectorSettingsSource>("=gr4cp::test::VectorSettingsSource");
     }();
