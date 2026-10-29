@@ -189,7 +189,7 @@ Supported authored transport values:
 - `http_poll`
 - `websocket`
 
-Authored stream metadata is read from graph block parameters. The preferred shape is nested under `parameters.stream`; compatibility flattened fields such as `stream_id`, `transport`, and `payload_format` are also accepted.
+Authored stream metadata is read from graph block parameters. The preferred shape is nested under `parameters.stream`; compatibility flattened fields such as `stream_id`, `transport`, and `payload_format` are also accepted. The block needs to declare only `transport` and `endpoint`, which the runtime's binding sets. The nested `stream` map, and the flat `stream_id` and `payload_format` of a block that gets a binding, move under the block's `meta_information` before the graph loads, and none of them becomes a block setting.
 
 Each descriptor includes:
 

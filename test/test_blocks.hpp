@@ -85,6 +85,20 @@ struct StreamEndpointSink : gr::Block<StreamEndpointSink> {
     void processOne(float) const noexcept {}
 };
 
+// Consumes float samples and declares `transport` and `endpoint`, the two settings a stream binding writes, and no
+// other stream key.
+struct BoundStreamSink : gr::Block<BoundStreamSink> {
+    gr::PortIn<float> in;
+    std::string transport;
+    std::string endpoint;
+
+    GR_MAKE_REFLECTABLE(BoundStreamSink, in, transport, endpoint);
+
+    explicit BoundStreamSink(gr::property_map init = {}) : gr::Block<BoundStreamSink>(std::move(init)) {}
+
+    void processOne(float) const noexcept {}
+};
+
 // Counts the live objects that hold it as a member. Every holder shares the one count.
 class LiveInstances {
 public:
@@ -147,6 +161,7 @@ inline void register_test_blocks() {
                registry.insert<FaultReportingSource>("=gr4cp::test::FaultReportingSource") &&
                registry.insert<FailingSource>("=gr4cp::test::FailingSource") &&
                registry.insert<StreamEndpointSink>("=gr4cp::test::StreamEndpointSink") &&
+               registry.insert<BoundStreamSink>("=gr4cp::test::BoundStreamSink") &&
                registry.insert<CountedSource>("=gr4cp::test::CountedSource") &&
                registry.insert<VectorSettingsSource>("=gr4cp::test::VectorSettingsSource");
     }();
