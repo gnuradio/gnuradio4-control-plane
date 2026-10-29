@@ -50,7 +50,25 @@ BlockSettingsService::Json BlockSettingsService::get(const std::string& session_
 
     try {
         auto settings = runtime_manager_.get_block_settings(session, block_unique_name);
-        return property_map_to_json(settings, settings.contains("__gr4cp_terminal"));
+        if (settings.contains("__gr4cp_terminal")) {
+            return property_map_to_json(settings, true);
+        }
+        // Live blocks may reflect vector/tensor settings which the HTTP scalar/map
+        // contract cannot represent. Keep supported status receipts observable and
+        // report every omitted field explicitly, as terminal capture already does.
+        auto result      = Json::object();
+        auto unavailable = Json::object();
+        for (const auto& [key, value] : settings) {
+            try {
+                result[std::string(key)] = pmt_value_to_json(value, false);
+            } catch (const RuntimeError& error) {
+                unavailable[std::string(key)] = error.what();
+            }
+        }
+        if (!unavailable.empty()) {
+            result["__gr4cp_unavailable_fields"] = std::move(unavailable);
+        }
+        return result;
     } catch (const runtime::BlockNotFoundError& error) {
         throw NotFoundError(error.what());
     } catch (const runtime::ReplyTimeoutError& error) {

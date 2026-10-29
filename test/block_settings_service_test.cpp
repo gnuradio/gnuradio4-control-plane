@@ -114,6 +114,20 @@ TEST_F(BlockSettingsServiceTest, GetReturnsJsonObjectFromRuntimeSettings) {
     EXPECT_EQ(result["nested"]["enabled"], true);
 }
 
+TEST_F(BlockSettingsServiceTest, LiveGetKeepsSourceReceiptsObservableWithUnsupportedVectorSettings) {
+    const auto session                     = create_session(gr4cp::domain::SessionState::Running);
+    runtime.settings[session.id]["radio0"] = gr::property_map{
+        {"frequency", std::vector<double>{100e6}},
+        {"source_status", gr::property_map{{"epoch_completion", gr::property_map{{"completed", true}, {"quiescent", true}, {"accepted_samples", std::uint64_t{31}}}}}},
+    };
+    const auto result = service.get(session.id, "radio0");
+    EXPECT_TRUE(result["source_status"]["epoch_completion"]["completed"]);
+    EXPECT_TRUE(result["source_status"]["epoch_completion"]["quiescent"]);
+    EXPECT_EQ(result["source_status"]["epoch_completion"]["accepted_samples"], 31);
+    EXPECT_FALSE(result.contains("frequency"));
+    EXPECT_TRUE(result["__gr4cp_unavailable_fields"].contains("frequency"));
+}
+
 TEST_F(BlockSettingsServiceTest, UpdateRejectsArrays) {
     const auto session = create_session(gr4cp::domain::SessionState::Running);
 
