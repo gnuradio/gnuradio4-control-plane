@@ -144,9 +144,9 @@ TEST(Gr4BlockCatalogProviderTest, BlockDetailsIncludeBuiltinParametersAndExtende
     EXPECT_EQ(unique_name->runtime_mutability, std::optional<std::string>("immutable"));
     EXPECT_FALSE(compute_domain->runtime_mutability.has_value());
     EXPECT_FALSE(disconnect_on_done->runtime_mutability.has_value());
-    EXPECT_FALSE(input_chunk_size->runtime_mutability.has_value());
-    EXPECT_FALSE(output_chunk_size->runtime_mutability.has_value());
-    EXPECT_FALSE(stride->runtime_mutability.has_value());
+    EXPECT_EQ(input_chunk_size->runtime_mutability, std::optional<std::string>("read_only"));
+    EXPECT_EQ(output_chunk_size->runtime_mutability, std::optional<std::string>("read_only"));
+    EXPECT_EQ(stride->runtime_mutability, std::optional<std::string>("read_only"));
     EXPECT_EQ(name->runtime_mutability, std::optional<std::string>("immutable"));
     EXPECT_FALSE(ui_constraints->runtime_mutability.has_value());
 

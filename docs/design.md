@@ -155,6 +155,10 @@ Live block settings are the narrow runtime control surface for active graphs:
 Rules:
 
 - settings calls are session-scoped
+- each execution owns one request output port connected to the scheduler input before startup;
+  settings calls reuse it under the session resource mutex. Connecting a fresh request port to
+  a running scheduler replaces its message reader and can invalidate outstanding worker spans.
+  Reply ports remain request-scoped, with request IDs selecting the matching reply.
 - the target block is addressed by runtime `unique_name`
 - the session must be running
 - stopped or errored sessions return conflict errors
