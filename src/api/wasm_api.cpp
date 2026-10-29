@@ -166,6 +166,10 @@ Json session_to_json(const domain::Session& session,
         body["scheduler_id"] = *session.scheduler_alias;
     }
 
+    if (session.completion_reason.has_value()) {
+        body["completion_reason"] = domain::to_string(*session.completion_reason);
+    }
+
     if (stream_plan.has_value()) {
         body["streams"] = stream_plan_to_json(*stream_plan);
     }

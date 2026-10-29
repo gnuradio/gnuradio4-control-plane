@@ -169,6 +169,12 @@ TEST(DomainSessionTest, ConvertsStateToAndFromString) {
     EXPECT_THROW(gr4cp::domain::session_state_from_string("nope"), std::invalid_argument);
 }
 
+TEST(DomainSessionTest, ConvertsCompletionReasonToString) {
+    EXPECT_EQ(gr4cp::domain::to_string(gr4cp::domain::CompletionReason::Completed), "completed");
+    EXPECT_EQ(gr4cp::domain::to_string(gr4cp::domain::CompletionReason::Stopped), "stopped");
+    EXPECT_EQ(gr4cp::domain::to_string(gr4cp::domain::CompletionReason::Error), "error");
+}
+
 TEST(DomainSessionTest, FormatsTimestampAsIso8601Utc) {
     const auto timestamp = gr4cp::domain::Timestamp{std::chrono::seconds{1704067200}};
     EXPECT_EQ(gr4cp::domain::format_timestamp_utc(timestamp), "2024-01-01T00:00:00Z");
@@ -336,6 +342,42 @@ TEST_F(SessionServiceTest, RunThatEndedWithAnErrorReadsError) {
     EXPECT_EQ(service.list().front().state, gr4cp::domain::SessionState::Error);
 }
 
+// A run that finished, one that a stop ended and one that failed each name their end on get and on list. A stop of a
+// run that already failed answers error with the run's message. A start clears the reason.
+TEST_F(SessionServiceTest, NaturalCompletionAndFailureReconcileOnGetAndList) {
+    using gr4cp::domain::CompletionReason;
+    using gr4cp::domain::SessionState;
+    const auto created = service.create("finite", "graph");
+    EXPECT_FALSE(created.completion_reason.has_value());
+
+    EXPECT_FALSE(service.start(created.id).completion_reason.has_value());
+    runtime.observation = {.ended = true};
+    const auto completed = service.get(created.id);
+    EXPECT_EQ(completed.state, SessionState::Stopped);
+    EXPECT_EQ(completed.completion_reason, CompletionReason::Completed);
+
+    EXPECT_FALSE(service.start(created.id).completion_reason.has_value());
+    const auto stopped = service.stop(created.id);
+    EXPECT_EQ(stopped.state, SessionState::Stopped);
+    EXPECT_EQ(stopped.completion_reason, CompletionReason::Stopped);
+
+    service.start(created.id);
+    runtime.observation = {.ended = true, .run_error = "worker failed"};
+    const auto listed = service.list();
+    ASSERT_EQ(listed.size(), 1U);
+    EXPECT_EQ(listed.front().state, SessionState::Error);
+    EXPECT_EQ(listed.front().last_error, std::optional<std::string>("worker failed"));
+    EXPECT_EQ(listed.front().completion_reason, CompletionReason::Error);
+
+    service.start(created.id);
+    runtime.observation = {.ended = true, .run_error = "worker failed again"};
+    const auto stop_of_failed = service.stop(created.id);
+    EXPECT_EQ(stop_of_failed.state, SessionState::Error);
+    EXPECT_EQ(stop_of_failed.last_error, std::optional<std::string>("worker failed again"));
+    EXPECT_EQ(stop_of_failed.completion_reason, CompletionReason::Error);
+    EXPECT_EQ(service.get(created.id).completion_reason, CompletionReason::Error);
+}
+
 TEST_F(SessionServiceTest, RemoveAndRestartReadAnEndedRunBeforeTheTeardown) {
     const auto removed = service.create("removed", "graph");
     service.start(removed.id);
@@ -407,8 +449,10 @@ TEST_F(SessionServiceTest, StopOfAFailedRunAReadRecordedKeepsTheRunsError) {
 
     EXPECT_EQ(stopped_after_the_read.state, gr4cp::domain::SessionState::Error);
     EXPECT_EQ(stopped_after_the_read.last_error, std::optional<std::string>("the run failed"));
+    EXPECT_EQ(stopped_after_the_read.completion_reason, gr4cp::domain::CompletionReason::Error);
     EXPECT_TRUE(runtime.actions.empty());
     EXPECT_EQ(service.get(read_first.id).last_error, std::optional<std::string>("the run failed"));
+    EXPECT_EQ(service.get(read_first.id).completion_reason, gr4cp::domain::CompletionReason::Error);
 
     const auto stopped_twice = service.create("stopped twice", "graph");
     service.start(stopped_twice.id);
@@ -420,6 +464,7 @@ TEST_F(SessionServiceTest, StopOfAFailedRunAReadRecordedKeepsTheRunsError) {
 
     EXPECT_EQ(second_stop.state, gr4cp::domain::SessionState::Error);
     EXPECT_EQ(second_stop.last_error, std::optional<std::string>("the run failed as it stopped"));
+    EXPECT_EQ(second_stop.completion_reason, gr4cp::domain::CompletionReason::Error);
     EXPECT_TRUE(runtime.actions.empty());
 }
 
@@ -511,15 +556,18 @@ TEST_F(SessionServiceTest, SecondStopAfterAFailedStopKeepsTheError) {
     ASSERT_EQ(failed_stop.state, gr4cp::domain::SessionState::Error);
     ASSERT_TRUE(failed_stop.last_error.has_value());
     EXPECT_NE(failed_stop.last_error->find(run_error), std::string::npos);
+    EXPECT_EQ(failed_stop.completion_reason, gr4cp::domain::CompletionReason::Error);
     runtime.actions.clear();
 
     const auto second_stop = service.stop(created.id);
 
     EXPECT_EQ(second_stop.state, gr4cp::domain::SessionState::Error);
+    EXPECT_EQ(second_stop.completion_reason, gr4cp::domain::CompletionReason::Error);
     EXPECT_EQ(second_stop.last_error, failed_stop.last_error);
     EXPECT_TRUE(runtime.actions.empty());
     const auto read = service.get(created.id);
     EXPECT_EQ(read.state, gr4cp::domain::SessionState::Error);
+    EXPECT_EQ(read.completion_reason, gr4cp::domain::CompletionReason::Error);
     EXPECT_EQ(read.last_error, failed_stop.last_error);
 }
 

@@ -34,6 +34,19 @@ SessionState session_state_from_string(const std::string_view state) {
     throw std::invalid_argument("invalid session state: " + std::string(state));
 }
 
+std::string to_string(const CompletionReason reason) {
+    switch (reason) {
+    case CompletionReason::Completed:
+        return "completed";
+    case CompletionReason::Stopped:
+        return "stopped";
+    case CompletionReason::Error:
+        return "error";
+    }
+
+    throw std::invalid_argument("unknown completion reason");
+}
+
 std::string format_timestamp_utc(const Timestamp& timestamp) {
     const auto time = std::chrono::system_clock::to_time_t(timestamp);
 

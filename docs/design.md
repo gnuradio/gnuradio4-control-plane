@@ -47,6 +47,7 @@ Each session stores:
 - `grc_content`
 - `state`
 - optional `last_error`
+- optional `completion_reason`: how the last run ended, `completed` by itself, `stopped` by a stop, or `error`; cleared when a run starts
 - `created_at`
 - `updated_at`
 - optional scheduler alias used by runtime preparation

@@ -1361,6 +1361,7 @@ connections:
 
     for (const auto& body : {parse_json(stopped), parse_json(read)}) {
         EXPECT_EQ(body["state"], "error") << body.dump();
+        EXPECT_EQ(body["completion_reason"], "error") << body.dump();
         ASSERT_TRUE(body["last_error"].is_string()) << body.dump();
         EXPECT_NE(body["last_error"].get<std::string>().find("the source fails"), std::string::npos) << body.dump();
     }
@@ -1396,6 +1397,7 @@ connections:
 
     for (const auto& body : {parse_json(stopped), parse_json(read)}) {
         EXPECT_EQ(body["state"], "error") << body.dump();
+        EXPECT_EQ(body["completion_reason"], "error") << body.dump();
         EXPECT_EQ(body["last_error"], parse_json(first_read)["last_error"]) << body.dump();
     }
 }
@@ -2679,6 +2681,31 @@ TEST_F(HttpApiTest, StopSessionSuccess) {
     const auto body = parse_json(response);
     EXPECT_EQ(body["state"], "stopped");
     EXPECT_TRUE(body["last_error"].is_null());
+}
+
+// A session that has not run carries no completion_reason. A stop sets it to stopped, and the next start clears it.
+TEST_F(HttpApiTest, CompletionReasonAppearsOnceARunHasEnded) {
+    const auto created = parse_json(client->Post("/sessions", R"({"name":"demo","grc":"flowgraph"})", "application/json"));
+    const auto id = created["id"].get<std::string>();
+    EXPECT_FALSE(created.contains("completion_reason")) << created.dump();
+
+    const auto started = client->Post(("/sessions/" + id + "/start").c_str(), "", "application/json");
+    ASSERT_TRUE(started);
+    EXPECT_FALSE(parse_json(started).contains("completion_reason")) << started->body;
+
+    const auto stopped = client->Post(("/sessions/" + id + "/stop").c_str(), "", "application/json");
+    ASSERT_TRUE(stopped);
+    EXPECT_EQ(parse_json(stopped)["completion_reason"], "stopped") << stopped->body;
+    const auto read = client->Get(("/sessions/" + id).c_str());
+    ASSERT_TRUE(read);
+    EXPECT_EQ(parse_json(read)["completion_reason"], "stopped") << read->body;
+    const auto listed = client->Get("/sessions");
+    ASSERT_TRUE(listed);
+    EXPECT_EQ(parse_json(listed)[0]["completion_reason"], "stopped") << listed->body;
+
+    const auto restarted = client->Post(("/sessions/" + id + "/start").c_str(), "", "application/json");
+    ASSERT_TRUE(restarted);
+    EXPECT_FALSE(parse_json(restarted).contains("completion_reason")) << restarted->body;
 }
 
 TEST_F(HttpApiTest, StopSessionFromStoppedIsNoOpSuccess) {

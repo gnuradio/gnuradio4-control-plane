@@ -175,7 +175,7 @@ Delete a session:
 curl -X DELETE http://127.0.0.1:8080/sessions/<id>
 ```
 
-Session responses include `id`, `name`, `state`, `created_at`, `updated_at`, and `last_error`. A running session may also include runtime-derived stream descriptors when the submitted graph contains supported managed stream metadata.
+Session responses include `id`, `name`, `state`, `created_at`, `updated_at`, and `last_error`. Once a run has ended, they include `completion_reason`: `completed` for a graph that finished, `stopped` for a run a stop ended, and `error` for a run that failed or whose stop failed. A start or a restart clears it, and a failed start or restart leaves the session in `error` without it. A running session may also include runtime-derived stream descriptors when the submitted graph contains supported managed stream metadata.
 
 Each read of a running session checks its run. The last error a block reported becomes `last_error`. A graph that finished reads `stopped`, and a graph that failed reads `error` with the run's error. Starting, stopping, restarting or deleting a session whose run already ended succeeds. A stop cancels the run: it does not wait for the blocks to process the samples already in the graph. A stop of a run that failed answers with the session in `error` and the run's error. A stop that fails leaves the session in `error`, and a second stop answers the session as it stands.
 
