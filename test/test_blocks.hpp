@@ -11,6 +11,7 @@
 #include <complex>
 #include <condition_variable>
 #include <cstdint>
+#include <limits>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -38,6 +39,54 @@ struct FiniteSource : gr::Block<FiniteSource> {
 
 private:
     gr::Size_t produced_ = 0U;
+};
+
+// Produces `n_samples` zeros and ends. When it ends, `lowest` and `highest` hold the least and the greatest value of
+// their 64-bit types.
+struct ExtremeValueSource : gr::Block<ExtremeValueSource> {
+    gr::PortOut<float> out;
+    gr::Size_t n_samples = 64U;
+    std::int64_t lowest = 0;
+    std::uint64_t highest = 0U;
+
+    GR_MAKE_REFLECTABLE(ExtremeValueSource, out, n_samples, lowest, highest);
+
+    explicit ExtremeValueSource(gr::property_map init = {}) : gr::Block<ExtremeValueSource>(std::move(init)) {}
+
+    gr::work::Status processBulk(gr::OutputSpanLike auto& outSpan) {
+        const auto n = std::min<std::size_t>(outSpan.size(), n_samples - produced_);
+        std::fill_n(outSpan.begin(), n, 0.0F);
+        outSpan.publish(n);
+        produced_ += static_cast<gr::Size_t>(n);
+        if (produced_ < n_samples) {
+            return gr::work::Status::OK;
+        }
+        lowest = std::numeric_limits<std::int64_t>::min();
+        highest = std::numeric_limits<std::uint64_t>::max();
+        return gr::work::Status::DONE;
+    }
+
+private:
+    gr::Size_t produced_ = 0U;
+};
+
+// Produces zeros until the run stops, and holds the 64-bit settings `offset` (signed), `limit` (unsigned) and `marks`
+// (a signed list). Each starts beyond the integers a double holds exactly.
+struct WideIntegerSource : gr::Block<WideIntegerSource> {
+    gr::PortOut<float> out;
+    std::int64_t offset = std::numeric_limits<std::int64_t>::min() + 1;
+    std::uint64_t limit = std::numeric_limits<std::uint64_t>::max() - 1U;
+    std::vector<std::int64_t> marks{std::numeric_limits<std::int64_t>::max() - 1, -1};
+
+    GR_MAKE_REFLECTABLE(WideIntegerSource, out, offset, limit, marks);
+
+    explicit WideIntegerSource(gr::property_map init = {}) : gr::Block<WideIntegerSource>(std::move(init)) {}
+
+    gr::work::Status processBulk(gr::OutputSpanLike auto& outSpan) {
+        std::ranges::fill(outSpan, 0.0F);
+        outSpan.publish(outSpan.size());
+        return gr::work::Status::OK;
+    }
 };
 
 // Reports an error from its first work call and goes on producing zeros.
@@ -233,6 +282,8 @@ inline void register_test_blocks() {
     static const bool registered = [] {
         auto& registry = gr::globalBlockRegistry();
         return registry.insert<FiniteSource>("=gr4cp::test::FiniteSource") &&
+               registry.insert<ExtremeValueSource>("=gr4cp::test::ExtremeValueSource") &&
+               registry.insert<WideIntegerSource>("=gr4cp::test::WideIntegerSource") &&
                registry.insert<FaultReportingSource>("=gr4cp::test::FaultReportingSource") &&
                registry.insert<FailingSource>("=gr4cp::test::FailingSource") &&
                registry.insert<StreamEndpointSink>("=gr4cp::test::StreamEndpointSink") &&

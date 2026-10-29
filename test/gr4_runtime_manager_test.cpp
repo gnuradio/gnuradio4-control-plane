@@ -26,6 +26,7 @@
 #include <filesystem>
 #include <format>
 #include <future>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -796,6 +797,38 @@ connections:
     const auto session = service.get(created.id);
     service.remove(created.id);
     EXPECT_THROW((void)runtime_.get_block_settings(session, "count0"), gr4cp::runtime::SessionNotRunningError);
+}
+
+// The settings a finished run left hold the exact least and greatest value of the two 64-bit types.
+TEST_F(Gr4RuntimeManagerTest, FinalSettingsHoldExact64BitValues) {
+    gr4cp::test::register_test_blocks();
+    gr4cp::storage::InMemorySessionRepository repository;
+    gr4cp::app::SessionService service(repository, runtime_);
+    const auto created = service.create("final_extremes", R"(blocks:
+  - id: "gr4cp::test::ExtremeValueSource"
+    parameters:
+      name: "extreme0"
+  - id: "gr::blocks::basic::NullSink<float32>"
+    parameters:
+      name: "sink0"
+connections:
+  - ["extreme0", 0, "sink0", 0]
+)");
+
+    EXPECT_EQ(service.start(created.id).state, gr4cp::domain::SessionState::Running);
+    const auto session = read_until(service, created.id, [](const auto& read) {
+        return read.state != gr4cp::domain::SessionState::Running;
+    });
+    ASSERT_EQ(session.state, gr4cp::domain::SessionState::Stopped);
+
+    const auto settings = runtime_.get_block_settings(session, "extreme0");
+    const auto* lowest = settings.at("lowest").get_if<std::int64_t>();
+    const auto* highest = settings.at("highest").get_if<std::uint64_t>();
+    ASSERT_NE(lowest, nullptr);
+    ASSERT_NE(highest, nullptr);
+    EXPECT_EQ(*lowest, std::numeric_limits<std::int64_t>::min());
+    EXPECT_EQ(*highest, std::numeric_limits<std::uint64_t>::max());
+    service.remove(created.id);
 }
 
 // The blocks of an ended run go when the session is deleted, and the service holds no lock meanwhile: while a block's

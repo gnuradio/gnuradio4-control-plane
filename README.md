@@ -229,7 +229,7 @@ curl -X POST 'http://127.0.0.1:8080/sessions/<id>/blocks/src0/settings?mode=imme
   -d '{"frequency":1250.0}'
 ```
 
-Request bodies must be JSON objects. Supported values are `null`, boolean, integer, floating point, string, array, and nested object values. The block converts each array element to its setting's element type. An object with exactly the two numbers `real` and `imag` is a complex value. A read returns a list setting as an array and a complex value in the same two-number form.
+Request bodies must be JSON objects. Supported values are `null`, boolean, integer, floating point, string, array, and nested object values. The block converts each array element to its setting's element type. An object with exactly the two numbers `real` and `imag` is a complex value. A read returns a list setting as an array and a complex value in the same two-number form. A 64-bit integer, signed or unsigned, reads as its decimal string, such as `"18446744073709551615"`. A smaller integer reads as a number. A patch takes a 64-bit setting, or an element of a list of them, as its decimal string or as a number. The block reads the string as a decimal integer, ignoring surrounding whitespace and a trailing `#` comment. A string it cannot read, or one outside the setting's range, is refused with 400 naming the key.
 
 Successful updates return:
 

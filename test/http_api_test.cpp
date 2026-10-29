@@ -9,6 +9,7 @@
 #include <format>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -18,6 +19,7 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include <boost/asio.hpp>
@@ -1181,11 +1183,155 @@ connections:
         body = parse_json(read);
     } while (status == 409 && std::chrono::steady_clock::now() < deadline);
     ASSERT_EQ(status, 200) << body.dump();
-    EXPECT_EQ(body["settings"]["count"], n_samples) << body.dump();
+    EXPECT_EQ(body["settings"]["count"], std::to_string(n_samples)) << body.dump();
 
     const auto session = client->Get(("/sessions/" + id).c_str());
     ASSERT_TRUE(session);
     EXPECT_EQ(parse_json(session)["state"], "stopped");
+}
+
+// A 64-bit setting reads as its decimal string while the run lives, here a counting sink's count, and after the run
+// has ended, here the least and the greatest value of the two 64-bit types.
+TEST_F(RealRuntimeHttpApiTest, SixtyFourBitSettingsReadAsDecimalStringsLiveAndFinal) {
+    gr4cp::test::register_test_blocks();
+    const auto live = create_session_with_graph(R"(blocks:
+  - id: "gr::blocks::basic::SignalGenerator<float32>"
+    parameters:
+      name: "src0"
+      sample_rate: 1000.0
+      chunk_size: 32
+  - id: "gr::blocks::testing::CountingSink<float32>"
+    parameters:
+      name: "count0"
+connections:
+  - ["src0", 0, "count0", 0]
+)")["id"].get<std::string>();
+    const auto started = client->Post(("/sessions/" + live + "/start").c_str(), "", "application/json");
+    ASSERT_TRUE(started);
+    ASSERT_EQ(started->status, 200);
+    const auto running = client->Get(("/sessions/" + live + "/blocks/count0/settings").c_str());
+    ASSERT_TRUE(running);
+    ASSERT_EQ(running->status, 200) << running->body;
+    const auto live_settings = parse_json(running)["settings"];
+    EXPECT_EQ(live_settings["n_samples_max"], "0") << live_settings.dump();
+    ASSERT_TRUE(live_settings["count"].is_string()) << live_settings.dump();
+    const auto count = live_settings["count"].get<std::string>();
+    EXPECT_EQ(std::to_string(std::stoull(count)), count);
+    const auto stopped = client->Post(("/sessions/" + live + "/stop").c_str(), "", "application/json");
+    ASSERT_TRUE(stopped);
+    ASSERT_EQ(stopped->status, 200);
+
+    const auto ended = create_session_with_graph(R"(blocks:
+  - id: "gr4cp::test::ExtremeValueSource"
+    parameters:
+      name: "extreme0"
+  - id: "gr::blocks::basic::NullSink<float32>"
+    parameters:
+      name: "sink0"
+connections:
+  - ["extreme0", 0, "sink0", 0]
+)")["id"].get<std::string>();
+    const auto finite = client->Post(("/sessions/" + ended + "/start").c_str(), "", "application/json");
+    ASSERT_TRUE(finite);
+    ASSERT_EQ(finite->status, 200);
+    std::string state;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    do {
+        const auto read = client->Get(("/sessions/" + ended).c_str());
+        ASSERT_TRUE(read);
+        state = parse_json(read)["state"].get<std::string>();
+    } while (state == "running" && std::chrono::steady_clock::now() < deadline);
+    ASSERT_EQ(state, "stopped");
+
+    const auto final_read = client->Get(("/sessions/" + ended + "/blocks/extreme0/settings").c_str());
+    ASSERT_TRUE(final_read);
+    ASSERT_EQ(final_read->status, 200) << final_read->body;
+    const auto final_settings = parse_json(final_read)["settings"];
+    EXPECT_EQ(final_settings["lowest"], std::to_string(std::numeric_limits<std::int64_t>::min())) << final_settings.dump();
+    EXPECT_EQ(final_settings["highest"], std::to_string(std::numeric_limits<std::uint64_t>::max())) << final_settings.dump();
+    EXPECT_EQ(final_settings["n_samples"], 64) << final_settings.dump();
+}
+
+// A patch writes back the decimal strings a read returned, then the values one past them, which no double holds. The
+// reads return each value exactly. The block reads the string as a decimal integer, ignoring surrounding whitespace and
+// a trailing `#` comment. A string it cannot read, or one outside the setting's range, is refused with 400 naming the
+// key, and the settings keep their values.
+TEST_F(RealRuntimeHttpApiTest, SixtyFourBitSettingsTakeTheDecimalStringsTheyReadAs) {
+    gr4cp::test::register_test_blocks();
+    const auto id = create_session_with_graph(R"(blocks:
+  - id: "gr4cp::test::WideIntegerSource"
+    parameters:
+      name: "wide0"
+  - id: "gr::blocks::basic::NullSink<float32>"
+    parameters:
+      name: "sink0"
+connections:
+  - ["wide0", 0, "sink0", 0]
+)")["id"].get<std::string>();
+    const auto started = client->Post(("/sessions/" + id + "/start").c_str(), "", "application/json");
+    ASSERT_TRUE(started);
+    ASSERT_EQ(started->status, 200);
+    const auto path = "/sessions/" + id + "/blocks/wide0/settings";
+    const auto read_settings = [&]() {
+        const auto read = client->Get(path.c_str());
+        EXPECT_TRUE(read);
+        EXPECT_EQ(read ? read->status : 0, 200) << (read ? read->body : "");
+        return read ? parse_json(read)["settings"] : nlohmann::json{};
+    };
+    const auto read_settings_until = [&](const std::string& key, const nlohmann::json& value) {
+        auto settings = read_settings();
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (settings[key] != value && std::chrono::steady_clock::now() < deadline) {
+            settings = read_settings();
+        }
+        return settings;
+    };
+
+    const auto first = read_settings();
+    ASSERT_TRUE(first["offset"].is_string()) << first.dump();
+    ASSERT_TRUE(first["limit"].is_string()) << first.dump();
+    ASSERT_TRUE(first["marks"].is_array() && first["marks"].size() == 2U && first["marks"][0].is_string()) << first.dump();
+    const nlohmann::json written_back{{"offset", first["offset"]}, {"limit", first["limit"]}, {"marks", first["marks"]}};
+    const auto rewritten = client->Post(path.c_str(), written_back.dump(), "application/json");
+    ASSERT_TRUE(rewritten);
+    ASSERT_EQ(rewritten->status, 200) << rewritten->body;
+
+    const nlohmann::json next{
+        {"offset", std::to_string(std::stoll(first["offset"].get<std::string>()) - 1)},
+        {"limit", std::to_string(std::stoull(first["limit"].get<std::string>()) + 1U)},
+        {"marks", {std::to_string(std::stoll(first["marks"][0].get<std::string>()) + 1), first["marks"][1]}},
+    };
+    const auto patched = client->Post(path.c_str(), next.dump(), "application/json");
+    ASSERT_TRUE(patched);
+    ASSERT_EQ(patched->status, 200) << patched->body;
+    const auto settings = read_settings_until("limit", next["limit"]);
+    EXPECT_EQ(settings["offset"], next["offset"]) << settings.dump();
+    EXPECT_EQ(settings["limit"], next["limit"]) << settings.dump();
+    EXPECT_EQ(settings["marks"], next["marks"]) << settings.dump();
+
+    const std::vector<std::pair<std::string, std::string>> refusals{
+        {"limit", R"({"limit":"-1"})"},
+        {"limit", R"({"limit":"18446744073709551616"})"},
+        {"offset", R"({"offset":"-9223372036854775809"})"},
+        {"offset", R"({"offset":"12x"})"},
+        {"offset", R"({"offset":""})"},
+        {"marks", R"({"marks":["1","2.5"]})"},
+    };
+    for (const auto& [key, patch] : refusals) {
+        const auto refused = client->Post(path.c_str(), patch, "application/json");
+        ASSERT_TRUE(refused);
+        EXPECT_EQ(refused->status, 400) << patch << " " << refused->body;
+        EXPECT_NE(refused->body.find(key), std::string::npos) << patch << " " << refused->body;
+    }
+
+    // a number still patches a 64-bit setting, and the refused patches staged nothing before it
+    const auto numbered = client->Post(path.c_str(), R"({"offset":-5})", "application/json");
+    ASSERT_TRUE(numbered);
+    ASSERT_EQ(numbered->status, 200) << numbered->body;
+    const auto last = read_settings_until("offset", "-5");
+    EXPECT_EQ(last["offset"], "-5") << last.dump();
+    EXPECT_EQ(last["limit"], next["limit"]) << last.dump();
+    EXPECT_EQ(last["marks"], next["marks"]) << last.dump();
 }
 
 TEST_F(RealRuntimeHttpApiTest, StopOfARunThatFailedUnreadAnswersWithTheRunsError) {

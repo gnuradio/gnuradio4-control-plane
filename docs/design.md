@@ -181,7 +181,7 @@ Supported JSON value shapes are:
 - an object with exactly the two numbers `real` and `imag`, a complex value
 - nested object
 
-A read returns a list setting as an array and a complex value as the object of `real` and `imag`.
+A read returns a list setting as an array and a complex value as the object of `real` and `imag`. A 64-bit integer, signed or unsigned, reads as its decimal string, in a running session and after its run has ended. A smaller integer reads as a number. A patch takes a 64-bit setting, or an element of a list of them, as its decimal string or as a number. The block reads the string as a decimal integer, ignoring surrounding whitespace and a trailing `#` comment. A string it cannot read, or one outside the setting's range, is refused with 400 naming the key.
 
 ## Stream Metadata
 

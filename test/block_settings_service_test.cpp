@@ -2,6 +2,7 @@
 
 #include <complex>
 #include <cstdint>
+#include <limits>
 #include <memory_resource>
 #include <optional>
 #include <string>
@@ -158,7 +159,7 @@ TEST_F(BlockSettingsServiceTest, GetReturnsTensorsAsArraysAndComplexAsParts) {
     EXPECT_EQ(result["gains"], nlohmann::json::parse("[0.5, 2.0]"));
     EXPECT_EQ(result["enabled"], nlohmann::json::parse("[true, false]"));
     EXPECT_EQ(result["taps"], nlohmann::json::parse(R"([{"real": 1.0, "imag": -1.0}])"));
-    EXPECT_EQ(result["mixed"], nlohmann::json::parse(R"([7, "seven"])"));
+    EXPECT_EQ(result["mixed"], nlohmann::json::parse(R"(["7", "seven"])"));
     EXPECT_EQ(result["correction"], nlohmann::json::parse(R"({"real": 0.5, "imag": 0.25})"));
 }
 
@@ -178,6 +179,32 @@ TEST_F(BlockSettingsServiceTest, GetOfAStoppedSessionAnswersWithTheEndedRunsSett
     EXPECT_EQ(runtime.last_block, "count0");
     EXPECT_EQ(result["done"], true);
     EXPECT_EQ(result.size(), 2U);
+}
+
+// A 64-bit integer reads as its exact decimal string, in a running session and after the run has ended, and so does
+// each element of a list of them. A smaller integer reads as a number.
+TEST_F(BlockSettingsServiceTest, SixtyFourBitIntegersReadAsDecimalStringsLiveAndFinal) {
+    constexpr auto lowest = std::numeric_limits<std::int64_t>::min();
+    constexpr auto highest = std::numeric_limits<std::uint64_t>::max();
+    gr::Tensor<std::int64_t> widths;
+    widths.push_back(1);
+    widths.push_back(lowest);
+    for (const auto state : {gr4cp::domain::SessionState::Running, gr4cp::domain::SessionState::Stopped}) {
+        const auto session = create_session(state);
+        runtime.settings[session.id]["probe0"] = gr::property_map{
+            {"lowest", lowest},
+            {"highest", highest},
+            {"small", std::int32_t{-7}},
+            {"widths", widths},
+        };
+
+        const auto result = service.get(session.id, "probe0");
+
+        EXPECT_EQ(result["lowest"], std::to_string(lowest)) << result.dump();
+        EXPECT_EQ(result["highest"], std::to_string(highest)) << result.dump();
+        EXPECT_EQ(result["small"], -7) << result.dump();
+        EXPECT_EQ(result["widths"], nlohmann::json::array({"1", std::to_string(lowest)})) << result.dump();
+    }
 }
 
 TEST_F(BlockSettingsServiceTest, RunEndingByItselfMapsToInvalidState) {

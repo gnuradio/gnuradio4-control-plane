@@ -36,11 +36,14 @@ bool is_complex_object(const nlohmann::json& value) {
            value[kRealPart].is_number() && value[kImaginaryPart].is_number();
 }
 
-// Converts a scalar, a complex number or a string to JSON. An empty value becomes null.
+// Converts a scalar, a complex number or a string to JSON. An empty value becomes null. A 64-bit integer becomes its
+// decimal string, which a client that parses every JSON number as a double reads exactly.
 template <typename T>
 nlohmann::json scalar_to_json(const T& item) {
     if constexpr (std::same_as<T, std::monostate>) {
         return nullptr;
+    } else if constexpr (std::same_as<T, std::int64_t> || std::same_as<T, std::uint64_t>) {
+        return std::to_string(item);
     } else if constexpr (is_complex<T>::value) {
         return nlohmann::json{{kRealPart, item.real()}, {kImaginaryPart, item.imag()}};
     } else if constexpr (std::same_as<T, std::string> || std::same_as<T, std::pmr::string> ||
