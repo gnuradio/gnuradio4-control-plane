@@ -189,6 +189,8 @@ Json session_to_json(const domain::Session& session, const std::optional<domain:
         {"last_error", session.last_error ? Json(*session.last_error) : Json(nullptr)},
     };
 
+    if(session.execution_id)body["execution_id"]=*session.execution_id;
+    if(session.completion_reason)body["completion_reason"]=*session.completion_reason;
     if (session.scheduler_alias.has_value()) {
         body["scheduler_id"] = *session.scheduler_alias;
     }

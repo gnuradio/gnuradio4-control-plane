@@ -144,4 +144,16 @@ TEST_F(BlockSettingsServiceTest, RuntimeTimeoutMapsToTimeoutError) {
     EXPECT_THROW(service.get(session.id, "sig0"), gr4cp::app::TimeoutError);
 }
 
+TEST_F(BlockSettingsServiceTest, TerminalGetPreservesExactSignedAndUnsigned64BitValues) {
+    const auto session    = create_session(gr4cp::domain::SessionState::Stopped);
+    auto       terminal   = session;
+    terminal.execution_id = "execution:42";
+    repository.update(terminal);
+    runtime.settings[session.id]["cluster"] = gr::property_map{{"__gr4cp_terminal", gr::property_map{{"execution_id", std::string("execution:42")}}}, {"finalization", gr::property_map{{"unsigned", std::uint64_t(UINT64_MAX)}, {"signed", std::int64_t(INT64_MIN)}}}};
+    const auto result                       = service.get(session.id, "cluster");
+    EXPECT_EQ(result["finalization"]["unsigned"], "18446744073709551615");
+    EXPECT_EQ(result["finalization"]["signed"], "-9223372036854775808");
+    EXPECT_EQ(result["__gr4cp_terminal"]["execution_id"], "execution:42");
+}
+
 }  // namespace

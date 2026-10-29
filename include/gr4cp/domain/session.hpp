@@ -22,6 +22,8 @@ struct Session {
     std::optional<std::string> scheduler_alias;
     SessionState state{SessionState::Stopped};
     std::optional<std::string> last_error;
+    std::optional<std::string> execution_id;
+    std::optional<std::string> completion_reason;
     Timestamp created_at;
     Timestamp updated_at;
 };

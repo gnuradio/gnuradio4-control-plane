@@ -1,6 +1,8 @@
 #include "gr4cp/domain/session.hpp"
 #include "gr4cp/runtime/gr4_runtime_manager.hpp"
 
+#include <gnuradio-4.0/Block.hpp>
+#include <gnuradio-4.0/BlockRegistry.hpp>
 #include <gnuradio-4.0/PluginLoader.hpp>
 
 #include <gtest/gtest.h>
@@ -154,6 +156,22 @@ connections:
   - ["src0", 0, "waterfall0", 0]
 )";
 }
+
+struct TerminalCaptureProbe : gr::Block<TerminalCaptureProbe> {
+    using gr::Block<TerminalCaptureProbe>::Block;
+    gr::PortOut<float> out;
+    gr::property_map   finalization;
+    std::string        oversized;
+    GR_MAKE_REFLECTABLE(TerminalCaptureProbe, out, finalization, oversized);
+    void stop() {
+        finalization = {{"unsigned", std::uint64_t(UINT64_MAX)}, {"signed", std::int64_t(INT64_MIN)}};
+        oversized.assign(5 * 1024 * 1024, 'x');
+    }
+    gr::work::Status processBulk(gr::OutputSpanLike auto& output) {
+        output.publish(0);
+        return gr::work::Status::DONE;
+    }
+};
 
 class Gr4RuntimeManagerTest : public ::testing::Test {
 protected:
@@ -355,6 +373,20 @@ TEST_F(Gr4RuntimeManagerTest, MissingBlockSettingsLookupIncludesAvailableRuntime
     runtime_.destroy(session);
 }
 
+TEST_F(Gr4RuntimeManagerTest, DataSetSinkStreamMetadataIsConsumedBeforeGraphImport) {
+    constexpr auto sink_id = "gr::studio::StudioDataSetSink<float64>";
+    if (!block_is_registered(sink_id)) {
+        GTEST_SKIP() << "block not registered: " << sink_id;
+    }
+    for (const auto metadata : {"      transport: http_poll\n      payload_format: dataset-xy-json-v1\n      stream_id: spectrum\n", "      stream: {id: spectrum, transport: http_poll, payload_format: dataset-xy-json-v1}\n"}) {
+        auto session = make_session("runtime_dataset_metadata", std::string("blocks:\n  - id: \"gr::studio::StudioDataSetSink<float64>\"\n"
+                                                                            "    parameters:\n      name: spectrum0\n") +
+                                                                    metadata + "connections: []\n");
+        EXPECT_NO_THROW(runtime_.prepare(session));
+        runtime_.destroy(session);
+    }
+}
+
 TEST_F(Gr4RuntimeManagerTest, CompatibilityStudioSeriesSinkHttpStreamCanBeFetchedFromRuntimeBinding) {
     if (!block_is_registered(kStudioSeriesSinkId)) {
         GTEST_SKIP() << "block not registered: " << kStudioSeriesSinkId;
@@ -409,6 +441,49 @@ TEST_F(Gr4RuntimeManagerTest, CompatibilityStudioWaterfallSinkHttpStreamCanBeFet
     EXPECT_NE(stream.body.find("\"payload_format\":\"waterfall-spectrum-json-v1\""), std::string::npos);
     EXPECT_NE(stream.body.find("\"layout\":\"waterfall_matrix\""), std::string::npos);
 
+    runtime_.stop(session);
+    runtime_.destroy(session);
+}
+
+TEST_F(Gr4RuntimeManagerTest, CapturesTerminalSettingsBeforeDestructionWithExactValuesAndExplicitLimits) {
+    gr::registerBlock<TerminalCaptureProbe, "qa::TerminalCaptureProbe">(gr::globalBlockRegistry());
+    auto session = make_session("terminal_capture", R"(blocks:
+  - id: "qa::TerminalCaptureProbe"
+    parameters:
+      name: "probe0"
+connections: []
+)");
+    runtime_.prepare(session);
+    runtime_.start(session);
+    const auto                                          deadline = std::chrono::steady_clock::now() + 3s;
+    std::optional<gr4cp::runtime::ExecutionObservation> observed;
+    do {
+        observed = runtime_.observe(session);
+        if (observed && observed->state != gr4cp::domain::SessionState::Running) {
+            break;
+        }
+        std::this_thread::yield();
+    } while (std::chrono::steady_clock::now() < deadline);
+    ASSERT_TRUE(observed);
+    ASSERT_EQ(observed->state, gr4cp::domain::SessionState::Stopped);
+    auto        settings     = runtime_.get_block_settings(session, "probe0");
+    const auto* finalization = settings.at("finalization").get_if<gr::property_map>();
+    ASSERT_NE(finalization, nullptr);
+    EXPECT_EQ(finalization->at("unsigned").value_or(std::uint64_t{}), UINT64_MAX);
+    EXPECT_EQ(finalization->at("signed").value_or(std::int64_t{}), INT64_MIN);
+    EXPECT_FALSE(settings.contains("oversized"));
+    const auto* metadata = settings.at("__gr4cp_terminal").get_if<gr::property_map>();
+    ASSERT_NE(metadata, nullptr);
+    EXPECT_EQ(metadata->at("execution_id").value_or(std::string{}), observed->execution_id);
+    EXPECT_FALSE(metadata->at("capture_complete").value_or(true));
+    ASSERT_TRUE(metadata->at("unavailable_fields").get_if<gr::property_map>()->contains("oversized"));
+    runtime_.stop(session);
+    EXPECT_EQ(runtime_.get_block_settings(session, "probe0"), settings);
+    const auto previous = observed->execution_id;
+    runtime_.destroy(session);
+    runtime_.prepare(session);
+    runtime_.start(session);
+    EXPECT_NE(runtime_.observe(session)->execution_id, previous);
     runtime_.stop(session);
     runtime_.destroy(session);
 }

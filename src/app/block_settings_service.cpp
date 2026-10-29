@@ -39,10 +39,18 @@ BlockSettingsUpdateResult BlockSettingsService::update(const std::string& sessio
 
 BlockSettingsService::Json BlockSettingsService::get(const std::string& session_id,
                                                      const std::string& block_unique_name) {
-    const auto session = load_running_session_or_throw(session_id);
+    const auto stored = repository_.get(session_id);
+    if (!stored) {
+        throw NotFoundError("session not found: " + session_id);
+    }
+    const auto session = *stored;
+    if (session.state != domain::SessionState::Running && !session.execution_id) {
+        throw InvalidStateError("session has no terminal execution: " + session_id);
+    }
 
     try {
-        return property_map_to_json(runtime_manager_.get_block_settings(session, block_unique_name));
+        auto settings = runtime_manager_.get_block_settings(session, block_unique_name);
+        return property_map_to_json(settings, settings.contains("__gr4cp_terminal"));
     } catch (const runtime::BlockNotFoundError& error) {
         throw NotFoundError(error.what());
     } catch (const runtime::ReplyTimeoutError& error) {
@@ -107,19 +115,19 @@ gr::pmt::Value BlockSettingsService::json_to_pmt_value(const Json& value) {
     throw ValidationError("unsupported JSON value in settings body");
 }
 
-BlockSettingsService::Json BlockSettingsService::property_map_to_json(const gr::property_map& value) {
+BlockSettingsService::Json BlockSettingsService::property_map_to_json(const gr::property_map& value, bool exact) {
     auto result = Json::object();
     for (const auto& [key, item] : value) {
-        result[std::string(key)] = pmt_value_to_json(item);
+        result[std::string(key)] = pmt_value_to_json(item, exact);
     }
     return result;
 }
 
-BlockSettingsService::Json BlockSettingsService::pmt_value_to_json(const gr::pmt::Value& value) {
+BlockSettingsService::Json BlockSettingsService::pmt_value_to_json(const gr::pmt::Value& value, bool exact) {
     Json result;
     bool converted = false;
 
-    gr::pmt::ValueVisitor([&result, &converted](const auto& item) {
+    gr::pmt::ValueVisitor([&result, &converted, exact](const auto& item) {
         using T = std::decay_t<decltype(item)>;
         if constexpr (std::same_as<T, std::monostate>) {
             result = nullptr;
@@ -128,7 +136,15 @@ BlockSettingsService::Json BlockSettingsService::pmt_value_to_json(const gr::pmt
             result = item;
             converted = true;
         } else if constexpr ((std::integral<T> && !std::same_as<T, bool>) || std::same_as<T, std::uint64_t>) {
-            result = item;
+            if constexpr (std::same_as<T, std::uint64_t> || std::same_as<T, std::int64_t>) {
+                if (exact) {
+                    result = std::to_string(item);
+                } else {
+                    result = item;
+                }
+            } else {
+                result = item;
+            }
             converted = true;
         } else if constexpr (std::floating_point<T>) {
             result = item;
@@ -140,7 +156,7 @@ BlockSettingsService::Json BlockSettingsService::pmt_value_to_json(const gr::pmt
             result = std::string(item);
             converted = true;
         } else if constexpr (std::same_as<T, gr::property_map>) {
-            result = property_map_to_json(item);
+            result    = property_map_to_json(item, exact);
             converted = true;
         }
     }).visit(value);
