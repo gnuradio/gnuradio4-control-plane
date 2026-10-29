@@ -16,6 +16,8 @@
 #include <vector>
 
 #include <boost/asio.hpp>
+#include <boost/uuid/random_generator.hpp>
+#include <boost/uuid/uuid_io.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/beast/version.hpp>
@@ -33,6 +35,12 @@ namespace beast = boost::beast;
 namespace http = beast::http;
 namespace websocket = beast::websocket;
 using tcp = asio::ip::tcp;
+
+// One identity for this server process, independent of session/execution IDs.
+const std::string& server_instance_id() {
+    static const std::string identity = boost::uuids::to_string(boost::uuids::random_generator{}());
+    return identity;
+}
 
 Json stream_to_json(const domain::BrowserStreamDescriptor& stream) {
     return Json{
@@ -173,6 +181,7 @@ Json schedulers_to_json(const std::vector<domain::SchedulerDescriptor>& schedule
 Json session_to_json(const domain::Session& session, const std::optional<domain::StreamRuntimePlan>& stream_plan = std::nullopt) {
     auto body = Json{
         {"id", session.id},
+        {"server_instance_id", server_instance_id()},
         {"name", session.name},
         {"state", domain::to_string(session.state)},
         {"created_at", domain::format_timestamp_utc(session.created_at)},
@@ -389,7 +398,7 @@ void register_routes(httplib::Server& server,
                      app::SchedulerCatalogService& scheduler_catalog_service,
                      app::BlockSettingsService& block_settings_service) {
     server.Get("/healthz", [](const httplib::Request&, httplib::Response& response) {
-        set_json_response(response, Json{{"ok", true}});
+        set_json_response(response, Json{{"ok", true}, {"server_instance_id", server_instance_id()}});
     });
 
     server.Get("/blocks", [&block_catalog_service](const httplib::Request&, httplib::Response& response) {
