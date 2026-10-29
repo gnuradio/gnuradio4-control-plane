@@ -1497,6 +1497,22 @@ TEST_F(HttpApiTest, BrowserFacingWebsocketRouteUpgradesAndProxiesFrames) {
     ASSERT_TRUE(runtime_manager.internal_port_for(id, "series0").has_value());
 }
 
+TEST_F(HttpApiTest, BrowserFacingWebsocketRouteForwardsLargeSnapshotAndSubsequentDelta) {
+    const auto created = create_session_with_graph(authored_websocket_graph());
+    const auto id = created["id"].get<std::string>();
+    ASSERT_TRUE(client->Post(("/sessions/" + id + "/start").c_str(), "", "application/json"));
+    auto stream = connect_websocket("/sessions/" + id + "/streams/series0/ws");
+    stream.read_message_max(128ULL * 1024 * 1024);
+    ASSERT_TRUE(runtime_manager.wait_for_websocket_connection(id, "series0"));
+    const std::string snapshot(24 * 1024 * 1024, 's');
+    runtime_manager.send_websocket_text(id, "series0", snapshot);
+    EXPECT_EQ(read_websocket_text(stream), snapshot);
+    runtime_manager.send_websocket_text(id, "series0", R"({"cursor":"9007199254740993"})");
+    EXPECT_EQ(read_websocket_text(stream), R"({"cursor":"9007199254740993"})");
+    ASSERT_TRUE(client->Post(("/sessions/" + id + "/stop").c_str(), "", "application/json"));
+    EXPECT_TRUE(wait_for_websocket_close(stream));
+}
+
 TEST_F(HttpApiTest, BrowserFacingWebsocketRouteProxiesAlternatePayloadFramesVerbatim) {
     const auto created = create_session_with_graph(alternate_websocket_graph());
     const auto id = created["id"].get<std::string>();
