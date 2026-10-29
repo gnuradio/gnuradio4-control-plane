@@ -112,9 +112,11 @@ int main() {
         }
 
         try {
+            std::cout << "Loading GNU Radio 4 block catalog..." << std::endl;
             (void)block_catalog_service.list();
-            (void)scheduler_catalog_service.list();
             std::cout << "Using GNU Radio 4-backed block catalog\n";
+            std::cout << "Loading GNU Radio 4 scheduler catalog..." << std::endl;
+            (void)scheduler_catalog_service.list();
             std::cout << "Using GNU Radio 4-backed scheduler catalog\n";
         } catch (const gr4cp::catalog::CatalogLoadError& error) {
             std::cerr << "GNU Radio 4 catalog initialization failed: " << error.what() << '\n';
