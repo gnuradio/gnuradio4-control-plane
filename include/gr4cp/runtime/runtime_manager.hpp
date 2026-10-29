@@ -51,6 +51,8 @@ public:
                                     const std::string& block_unique_name,
                                     const gr::property_map& patch,
                                     BlockSettingsMode mode) = 0;
+    // Reads a block's settings in the run in progress, else the settings the session's last ended run left. Throws
+    // SessionNotRunningError when the session has neither, or its run is stopping.
     virtual gr::property_map get_block_settings(const domain::Session& session,
                                                 const std::string& block_unique_name) = 0;
     // Reports the last error a block of the run raised since the previous call, and whether the run ended. An ended

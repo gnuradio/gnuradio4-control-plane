@@ -158,8 +158,10 @@ Rules:
 
 - settings calls are session-scoped
 - the target block is addressed by name, unique name or `name` setting, in that order
-- the session must be running; the settings calls read the session as `GET /sessions/{id}` does
-- stopped or errored sessions, and a run that is ending by itself, return conflict errors
+- the settings calls read the session as `GET /sessions/{id}` does
+- an update needs a running session; stopped or errored sessions, and a run that is ending by itself, return conflict errors
+- a read of a session whose run has ended, by itself or by a stop, answers with the settings the run left; the runtime keeps the ended run's block handles until the session starts again or is deleted
+- a read of a session that has not run, or whose run is stopping, returns a conflict error
 - a name that more than one block carries is refused with the candidates
 - stored GRC content is not inspected to fabricate values
 

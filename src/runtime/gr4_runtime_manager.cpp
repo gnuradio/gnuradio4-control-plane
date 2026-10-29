@@ -495,6 +495,14 @@ struct Gr4RuntimeManager::Execution {
     std::optional<gr::Runtime> runtime;
     std::map<std::string, gr::BlockHandle, std::less<>> blocks;  // every block of the graph, by unique name
     bool running{false};
+
+    // The handles of the blocks alone, for a run that has ended. A handle keeps its block alive and reads the settings
+    // the run left.
+    std::unique_ptr<Execution> ended_blocks() const {
+        auto ended = std::make_unique<Execution>();
+        ended->blocks = blocks;
+        return ended;
+    }
 };
 
 // A session's run, held under its resources' lock.
@@ -511,6 +519,8 @@ struct Gr4RuntimeManager::SessionRuntimeResources {
     bool teardown_complete{true};
     std::optional<std::string> teardown_error;
     std::unique_ptr<Execution> execution;
+    // the blocks of the session's last ended run, read for their final settings until the next prepare or destroy
+    std::unique_ptr<Execution> ended_execution;
     std::vector<domain::RuntimeStreamBinding> stream_bindings;
     std::mutex mutex;
 };
@@ -595,6 +605,7 @@ void Gr4RuntimeManager::destroy(const domain::Session& session) {
         std::unique_lock resource_lock(resources->mutex);
         std::ignore = stop_locked(session, *resources, resource_lock);
         resources->execution.reset();
+        resources->ended_execution.reset();
         release_stream_bindings_locked(*resources);
         resources->lifecycle_phase = LifecyclePhase::Idle;
         resources->teardown_complete = true;
@@ -727,14 +738,29 @@ void Gr4RuntimeManager::set_block_settings(const domain::Session& session,
 }
 
 gr::property_map Gr4RuntimeManager::get_block_settings(const domain::Session& session, const std::string& block_target) {
-    auto run = live_execution(session);
-    if (!run.has_value()) {
+    auto resources = find_resources(session.id);
+    if (!resources) {
+        throw not_running(session, "settings read");
+    }
+    std::lock_guard resource_lock(resources->mutex);
+
+    // the run in progress or a run that has ended unread, else the session's last ended run; a stopping run has neither
+    Execution* source = resources->ended_execution.get();
+    if (auto* execution = resources->execution.get();
+        execution != nullptr && execution->running && resources->lifecycle_phase == LifecyclePhase::Running) {
+        using enum gr::Runtime::State;
+        const auto& runtime = *execution->runtime;
+        const auto state = runtime.state();
+        const bool stopping = state == RequestedStop || state == Stopped || state == Error;
+        source = !stopping || runtime.waitFor(std::chrono::nanoseconds{0}) ? execution : nullptr;
+    }
+    if (source == nullptr) {
         throw not_running(session, "settings read");
     }
 
-    auto* block = resolve_runtime_block(run->execution.blocks, block_target);
+    auto* block = resolve_runtime_block(source->blocks, block_target);
     if (block == nullptr) {
-        throw make_block_not_found_error(run->execution.blocks, block_target);
+        throw make_block_not_found_error(source->blocks, block_target);
     }
     return block->get();
 }
@@ -761,7 +787,8 @@ RunObservation Gr4RuntimeManager::observe(const domain::Session& session) {
         observation.run_error = result.error().message;
     }
     auto& resources = *run->resources;
-    // the graph and its blocks go first, then the ports their stream bindings held
+    resources.ended_execution = run->execution.ended_blocks();
+    // the graph goes first, then the ports its stream bindings held
     observation.ended_run = std::shared_ptr<Execution>(
         resources.execution.release(),
         [this, bindings = std::exchange(resources.stream_bindings, {})](Execution* ended) {
@@ -900,6 +927,7 @@ Gr4RuntimeManager::Execution& Gr4RuntimeManager::prepare_locked(const domain::Se
     }
 
     resources.execution = std::move(execution);
+    resources.ended_execution.reset();
     resources.stream_bindings = std::move(stream_bindings);
     resources.generation += 1;
     resources.lifecycle_phase = LifecyclePhase::Idle;
@@ -946,6 +974,9 @@ std::optional<std::string> Gr4RuntimeManager::stop_locked(const domain::Session&
     }
     const auto result = execution->runtime->result();
 
+    if (execution->running) {
+        resources.ended_execution = execution->ended_blocks();
+    }
     execution->running = false;
     release_stream_bindings_locked(resources);
     resources.execution.reset();

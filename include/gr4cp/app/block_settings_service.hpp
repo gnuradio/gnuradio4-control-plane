@@ -21,7 +21,8 @@ class BlockSettingsService {
 public:
     using Json = nlohmann::json;
 
-    // Reads each session through `sessions`. A run that ended by itself then reads as not running.
+    // Reads each session through `sessions`. A run that ended by itself then reads as not running: an update is
+    // refused, and a read answers with the settings the run left.
     BlockSettingsService(SessionService& sessions, runtime::RuntimeManager& runtime_manager);
 
     BlockSettingsUpdateResult update(const std::string& session_id,
