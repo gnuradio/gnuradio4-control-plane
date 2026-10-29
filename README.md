@@ -121,6 +121,9 @@ The public product API is limited to these endpoints:
 - `GET /blocks/{id}`
 
 `GET /healthz` is a temporary bootstrap endpoint and is not part of the product API.
+HTTP health and session responses include `server_instance_id`, stable for the server
+process and regenerated on restart. Clients must not reuse ownership across instances.
+A new instance does not establish that external device tasks have stopped.
 
 Errors are returned as JSON:
 

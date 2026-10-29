@@ -567,6 +567,10 @@ bool inject_stream_bindings(gr::property_map& root, const std::vector<domain::Ru
             if (binding.plan.block_instance_name != *name) {
                 continue;
             }
+            // Stream descriptors belong to the control plane, not GR4 block settings.
+            parameters.erase("stream");
+            parameters.erase("stream_id");
+            parameters.erase("payload_format");
             parameters["endpoint"] = binding.internal.endpoint;
             parameters["transport"] = binding.plan.transport;
             (*block)["parameters"] = parameters;
@@ -617,18 +621,10 @@ std::string normalize_graph_content(std::string_view content, const std::vector<
     return changed ? gr::pmt::yaml::serialize(root) : std::string(content);
 }
 
-template <gr::message::Command Command>
-gr::Message send_block_settings_request(gr::BlockModel& scheduler_block,
-                                        std::string_view block_unique_name,
-                                        std::string_view endpoint,
-                                        gr::property_map payload,
-                                        std::chrono::milliseconds timeout) {
-    gr::MsgPortOutBuiltin request_port;
+template<gr::message::Command Command>
+gr::Message send_block_settings_request(gr::MsgPortOutBuiltin& request_port, gr::BlockModel& scheduler_block, std::string_view block_unique_name, std::string_view endpoint, gr::property_map payload, std::chrono::milliseconds timeout) {
     gr::MsgPortInBuiltin response_port;
 
-    if (auto connection = request_port.connect(*scheduler_block.msgIn); !connection_succeeded(connection)) {
-        throw std::runtime_error(std::format("failed to connect runtime request port: {}", connection_error_message(connection)));
-    }
     if (auto connection = scheduler_block.msgOut->connect(response_port); !connection_succeeded(connection)) {
         throw std::runtime_error(std::format("failed to connect runtime response port: {}", connection_error_message(connection)));
     }
@@ -666,6 +662,10 @@ gr::property_map parse_settings_reply(const gr::Message& reply, std::string_view
 }  // namespace
 
 struct Gr4RuntimeManager::Execution {
+    // Connect once before start. Reconnecting a running scheduler replaces its input
+    // reader while message spans can still be alive on a worker. Keep the writer
+    // alive until after the scheduler is destroyed (reverse member destruction).
+    gr::MsgPortOutBuiltin               request_port;
     std::shared_ptr<gr::SchedulerModel> scheduler;
     bool running{false};
 };
@@ -912,12 +912,7 @@ void Gr4RuntimeManager::set_block_settings(const domain::Session& session,
     const auto* endpoint = mode == BlockSettingsMode::Staged ? gr::block::property::kStagedSetting
                                                              : gr::block::property::kSetting;
     try {
-        const auto reply = send_block_settings_request<gr::message::Command::Set>(
-            *scheduler_block,
-            runtime_block_id,
-            endpoint,
-            patch,
-            std::chrono::milliseconds(1000));
+        const auto reply = send_block_settings_request<gr::message::Command::Set>(execution->request_port, *scheduler_block, runtime_block_id, endpoint, patch, std::chrono::milliseconds(1000));
         (void)parse_settings_reply(reply, runtime_block_id, endpoint);
     } catch (const BlockNotFoundError&) {
         throw;
@@ -951,12 +946,7 @@ gr::property_map Gr4RuntimeManager::get_block_settings(const domain::Session& se
     const auto runtime_block_id = std::string(resolved_block->uniqueName());
 
     try {
-        const auto reply = send_block_settings_request<gr::message::Command::Get>(
-            *scheduler_block,
-            runtime_block_id,
-            gr::block::property::kSetting,
-            {},
-            std::chrono::milliseconds(1000));
+        const auto reply = send_block_settings_request<gr::message::Command::Get>(execution->request_port, *scheduler_block, runtime_block_id, gr::block::property::kSetting, {}, std::chrono::milliseconds(1000));
         return parse_settings_reply(reply, runtime_block_id, gr::block::property::kSetting);
     } catch (const BlockNotFoundError&) {
         throw;
@@ -1029,6 +1019,13 @@ Gr4RuntimeManager::Execution& Gr4RuntimeManager::prepare_locked(const domain::Se
             throw runtime_error(session, "prepare", "scheduler not found: " + scheduler_alias);
         }
         execution->scheduler->setGraph(std::move(*graph));
+        auto* scheduler_block = execution->scheduler->asBlockModel();
+        if (scheduler_block == nullptr) {
+            throw runtime_error(session, "prepare", "scheduler does not expose a runtime block model");
+        }
+        if (auto connection = execution->request_port.connect(*scheduler_block->msgIn); !connection_succeeded(connection)) {
+            throw runtime_error(session, "prepare", std::format("failed to connect runtime request port: {}", connection_error_message(connection)));
+        }
     } catch (const std::exception& error) {
         for (const auto& binding : stream_bindings) {
             stream_allocator_.release(binding.internal);
