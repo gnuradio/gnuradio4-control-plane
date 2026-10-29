@@ -323,10 +323,50 @@ bool normalize_connection(gr::pmt::Value& connection) {
     return true;
 }
 
-// Erases the stream keys of each block bound to a managed stream. The control plane reads these keys from the
-// session's graph text, and the graph loader refuses a parameter the block does not declare. The binding's endpoint
-// and transport reach the block as load overrides. Returns whether a block changed.
-bool erase_bound_stream_keys(gr::property_map& root, const std::vector<domain::RuntimeStreamBinding>& bindings) {
+// Moves the parameter `name` of a block entry under the entry's meta_information. The graph loader refuses a parameter
+// the block does not declare and restores the entry's meta_information onto the block.
+bool move_parameter_to_meta_information(gr::property_map& block, gr::property_map& parameters, std::string_view name) {
+    const std::pmr::string key(name);
+    const auto it = parameters.find(key);
+    if (it == parameters.end()) {
+        return false;
+    }
+
+    gr::property_map meta_information;
+    if (const auto meta_it = block.find("meta_information"); meta_it != block.end()) {
+        if (const auto* existing = meta_it->second.get_if<gr::property_map>(); existing != nullptr) {
+            meta_information = *existing;
+        }
+    }
+    meta_information.insert_or_assign(key, it->second);
+    parameters.erase(it);
+    block["meta_information"] = meta_information;
+    return true;
+}
+
+// Moves a block's nested `stream` map under its meta_information. The control plane reads the map from the session's
+// graph text, and no block declares it.
+void move_stream_intent_to_meta_information(gr::property_map& block) {
+    const auto parameters_it = block.find("parameters");
+    if (parameters_it == block.end()) {
+        return;
+    }
+    const auto* existing = parameters_it->second.get_if<gr::property_map>();
+    if (existing == nullptr) {
+        return;
+    }
+
+    auto parameters = *existing;
+    if (move_parameter_to_meta_information(block, parameters, "stream")) {
+        block["parameters"] = parameters;
+    }
+}
+
+// Moves the flat `stream_id` and `payload_format` keys of each block bound to a managed stream under its
+// meta_information. The binding's endpoint and transport reach the block as load overrides. Returns whether a key
+// moved.
+bool move_bound_stream_keys_to_meta_information(gr::property_map& root,
+                                                const std::vector<domain::RuntimeStreamBinding>& bindings) {
     const auto it = root.find("blocks");
     if (bindings.empty() || it == root.end()) {
         return false;
@@ -360,8 +400,9 @@ bool erase_bound_stream_keys(gr::property_map& root, const std::vector<domain::R
             continue;
         }
 
-        const auto erased = parameters.erase("stream") + parameters.erase("stream_id") + parameters.erase("payload_format");
-        if (erased != 0) {
+        const bool moved_id = move_parameter_to_meta_information(*block, parameters, "stream_id");
+        const bool moved_format = move_parameter_to_meta_information(*block, parameters, "payload_format");
+        if (moved_id || moved_format) {
             (*block)["parameters"] = parameters;
             changed = true;
         }
@@ -370,7 +411,8 @@ bool erase_bound_stream_keys(gr::property_map& root, const std::vector<domain::R
 }
 
 // Returns the graph document the runtime loads: each block entry in the shape the graph loader reads, the stream keys
-// of `bindings` erased, and each connection's ports as indices or names.
+// of `bindings` and every nested `stream` map moved under the block's meta_information, and each connection's ports as
+// indices or names.
 std::string normalize_graph_content(std::string_view content, const std::vector<domain::RuntimeStreamBinding>& bindings) {
     const auto parsed = gr::pmt::yaml::deserialize(content);
     if (!parsed.has_value()) {
@@ -386,13 +428,14 @@ std::string normalize_graph_content(std::string_view content, const std::vector<
                 if (auto* block = block_value.get_if<gr::property_map>(); block != nullptr) {
                     const auto before = *block;
                     normalize_block(*block);
+                    move_stream_intent_to_meta_information(*block);
                     changed = changed || (*block != before);
                 }
             }
         }
     }
 
-    changed = erase_bound_stream_keys(root, bindings) || changed;
+    changed = move_bound_stream_keys_to_meta_information(root, bindings) || changed;
 
     if (auto it = root.find("connections"); it != root.end()) {
         if (auto* connections = it->second.get_if<gr::Tensor<gr::pmt::Value>>(); connections != nullptr) {

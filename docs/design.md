@@ -196,6 +196,8 @@ Authored stream metadata may be expressed in either of these forms:
 - preferred nested metadata under `parameters.stream`
 - compatibility flattened fields such as `stream_id`, `transport`, and `payload_format`
 
+The graph loader refuses a parameter the block does not declare. Before the graph loads, the nested `stream` map, and the flat `stream_id` and `payload_format` of a block that gets a binding, move under the block's `meta_information`. The binding's `endpoint` and `transport` reach the block as load overrides.
+
 Runtime stream descriptors are serialized in session responses under `streams` only when the session is running and the runtime has active stream bindings. Each descriptor contains:
 
 - `id`

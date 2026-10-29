@@ -30,6 +30,7 @@
 #include <system_error>
 #include <thread>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -829,6 +830,102 @@ connections:
 
     runtime_.stop(session);
     runtime_.destroy(session);
+}
+
+// A block that names its stream with the flat stream_id key loads, though it declares no such setting. The route
+// carries that id and reaches the block's endpoint.
+TEST_F(Gr4RuntimeManagerTest, FlatStreamIdOfABoundBlockLoadsAndNamesTheRoute) {
+    gr4cp::test::register_test_blocks();
+    auto session = make_session("runtime_flat_stream_id", R"(blocks:
+  - id: "gr::blocks::basic::SignalGenerator<float32>"
+    parameters:
+      name: "src0"
+      sample_rate: 1000.0
+      chunk_size: 32
+  - id: "gr4cp::test::StreamEndpointSink"
+    parameters:
+      name: "stream0"
+      stream_id: "scope"
+      transport: "websocket"
+      payload_format: "series-window-json-v1"
+connections:
+  - ["src0", 0, "stream0", 0]
+)");
+    ASSERT_NO_THROW(runtime_.prepare(session));
+    runtime_.start(session);
+
+    const auto route = runtime_.resolve_websocket_stream(session, "scope");
+    const auto settings = runtime_.get_block_settings(session, "stream0");
+    EXPECT_FALSE(route.internal.endpoint.empty());
+    ASSERT_TRUE(settings.contains("endpoint"));
+    EXPECT_EQ(settings.at("endpoint").value_or(std::string()), route.internal.endpoint);
+
+    runtime_.stop(session);
+    runtime_.destroy(session);
+}
+
+// The stream keys of a block that declares only the binding's settings, flat or nested under `stream`, reach none of
+// its settings. The block starts with the keys in its meta_information, and the stream descriptor keeps the id and the
+// payload format the graph names.
+TEST_F(Gr4RuntimeManagerTest, StreamKeysReachNoBlockSetting) {
+    gr4cp::test::register_test_blocks();
+    const auto graph = [](std::string_view stream_keys) {
+        return std::format(R"(blocks:
+  - id: "gr::blocks::basic::SignalGenerator<float32>"
+    parameters:
+      name: "src0"
+      sample_rate: 1000.0
+      chunk_size: 32
+  - id: "gr4cp::test::BoundStreamSink"
+    parameters:
+      name: "sink0"
+{}connections:
+  - ["src0", 0, "sink0", 0]
+)",
+                           stream_keys);
+    };
+    const auto flat = graph("      stream_id: \"scope\"\n      transport: \"http_poll\"\n"
+                            "      payload_format: \"series-window-json-v1\"\n");
+    const auto nested = graph("      stream:\n        id: \"scope\"\n        transport: \"http_poll\"\n"
+                              "        payload_format: \"series-window-json-v1\"\n");
+    for (const auto& [form, yaml] : {std::pair{"flat", flat}, std::pair{"nested", nested}}) {
+        auto session = make_session(std::format("runtime_stream_keys_{}", form), yaml);
+        gr4cp::test::BoundStreamSink::forget_started();
+        ASSERT_NO_THROW(runtime_.prepare(session)) << form;
+        runtime_.start(session);
+        const auto started = gr4cp::test::BoundStreamSink::wait_until_started(std::chrono::seconds(10));
+        ASSERT_TRUE(started.has_value()) << form;
+        const auto& meta_information = *started;
+
+        const auto plan = runtime_.active_stream_plan(session);
+        ASSERT_TRUE(plan.has_value()) << form;
+        ASSERT_EQ(plan->streams.size(), 1U) << form;
+        EXPECT_EQ(plan->streams.front().stream_id, "scope") << form;
+        EXPECT_EQ(plan->streams.front().payload_format, "series-window-json-v1") << form;
+        const auto settings = runtime_.get_block_settings(session, "sink0");
+        for (const auto* key : {"stream", "stream_id", "payload_format"}) {
+            EXPECT_FALSE(settings.contains(key)) << form << ": " << key;
+        }
+        EXPECT_EQ(settings.at("transport").value_or(std::string()), "http_poll") << form;
+        EXPECT_FALSE(settings.at("endpoint").value_or(std::string()).empty()) << form;
+
+        runtime_.stop(session);
+        if (std::string_view(form) == "flat") {
+            ASSERT_TRUE(meta_information.contains("stream_id")) << form;
+            EXPECT_EQ(meta_information.at("stream_id").value_or(std::string()), "scope") << form;
+            ASSERT_TRUE(meta_information.contains("payload_format")) << form;
+            EXPECT_EQ(meta_information.at("payload_format").value_or(std::string()), "series-window-json-v1") << form;
+        } else {
+            ASSERT_TRUE(meta_information.contains("stream")) << form;
+            const auto* stream = meta_information.at("stream").get_if<gr::property_map>();
+            ASSERT_NE(stream, nullptr) << form;
+            ASSERT_TRUE(stream->contains("id")) << form;
+            EXPECT_EQ(stream->at("id").value_or(std::string()), "scope") << form;
+            ASSERT_TRUE(stream->contains("payload_format")) << form;
+            EXPECT_EQ(stream->at("payload_format").value_or(std::string()), "series-window-json-v1") << form;
+        }
+        runtime_.destroy(session);
+    }
 }
 
 // The stream routes refuse a run that is ending by itself, as the settings calls do.
