@@ -19,10 +19,19 @@ struct WebSocketStreamRoute {
     domain::InternalStreamBinding internal;
 };
 
+struct ExecutionObservation {
+    domain::SessionState       state;
+    std::string                execution_id;
+    std::optional<std::string> completion_reason;
+    std::optional<std::string> error;
+};
+
 class RuntimeManager {
 public:
     virtual ~RuntimeManager() = default;
 
+    // Reconcile an asynchronous execution without starting or restarting it.
+    virtual std::optional<ExecutionObservation>      observe(const domain::Session&) { return std::nullopt; }
     virtual void prepare(const domain::Session& session) = 0;
     virtual void start(const domain::Session& session) = 0;
     virtual void stop(const domain::Session& session) = 0;

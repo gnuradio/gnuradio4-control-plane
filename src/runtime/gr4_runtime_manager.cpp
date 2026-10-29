@@ -567,6 +567,10 @@ bool inject_stream_bindings(gr::property_map& root, const std::vector<domain::Ru
             if (binding.plan.block_instance_name != *name) {
                 continue;
             }
+            // Stream descriptors belong to the control plane, not GR4 block settings.
+            parameters.erase("stream");
+            parameters.erase("stream_id");
+            parameters.erase("payload_format");
             parameters["endpoint"] = binding.internal.endpoint;
             parameters["transport"] = binding.plan.transport;
             (*block)["parameters"] = parameters;
@@ -617,18 +621,10 @@ std::string normalize_graph_content(std::string_view content, const std::vector<
     return changed ? gr::pmt::yaml::serialize(root) : std::string(content);
 }
 
-template <gr::message::Command Command>
-gr::Message send_block_settings_request(gr::BlockModel& scheduler_block,
-                                        std::string_view block_unique_name,
-                                        std::string_view endpoint,
-                                        gr::property_map payload,
-                                        std::chrono::milliseconds timeout) {
-    gr::MsgPortOutBuiltin request_port;
+template<gr::message::Command Command>
+gr::Message send_block_settings_request(gr::MsgPortOutBuiltin& request_port, gr::BlockModel& scheduler_block, std::string_view block_unique_name, std::string_view endpoint, gr::property_map payload, std::chrono::milliseconds timeout) {
     gr::MsgPortInBuiltin response_port;
 
-    if (auto connection = request_port.connect(*scheduler_block.msgIn); !connection_succeeded(connection)) {
-        throw std::runtime_error(std::format("failed to connect runtime request port: {}", connection_error_message(connection)));
-    }
     if (auto connection = scheduler_block.msgOut->connect(response_port); !connection_succeeded(connection)) {
         throw std::runtime_error(std::format("failed to connect runtime response port: {}", connection_error_message(connection)));
     }
@@ -666,6 +662,10 @@ gr::property_map parse_settings_reply(const gr::Message& reply, std::string_view
 }  // namespace
 
 struct Gr4RuntimeManager::Execution {
+    // Connect once before start. Reconnecting a running scheduler replaces its input
+    // reader while message spans can still be alive on a worker. Keep the writer
+    // alive until after the scheduler is destroyed (reverse member destruction).
+    gr::MsgPortOutBuiltin               request_port;
     std::shared_ptr<gr::SchedulerModel> scheduler;
     bool running{false};
 };
@@ -679,6 +679,9 @@ struct Gr4RuntimeManager::SessionRuntimeResources {
     std::optional<std::string> async_error;
     std::unique_ptr<Execution> execution;
     std::vector<domain::RuntimeStreamBinding> stream_bindings;
+    std::unordered_map<std::string, gr::property_map> terminal_settings;
+    std::unordered_map<std::string, std::string>      terminal_aliases;
+    std::optional<std::string>                        terminal_reason;
     std::mutex mutex;
 };
 
@@ -722,6 +725,27 @@ std::vector<std::filesystem::path> Gr4RuntimeManager::default_plugin_directories
 #endif
 }
 
+std::optional<ExecutionObservation> Gr4RuntimeManager::observe(const domain::Session& session) {
+    auto r = find_resources(session.id);
+    if (!r) {
+        return std::nullopt;
+    }
+    std::unique_lock lock(r->mutex);
+    if (r->execution && r->execution->running) {
+        const auto state = r->execution->scheduler->asBlockModel()->state();
+        if (state == gr::lifecycle::State::STOPPED || state == gr::lifecycle::State::ERROR) {
+            r->terminal_reason = state == gr::lifecycle::State::ERROR ? "error" : "completed";
+            try {
+                stop_locked(session, *r, lock);
+            } catch (const std::exception& e) {
+                r->async_error = e.what();
+            }
+        }
+    }
+    const bool running = r->execution && r->execution->running;
+    return ExecutionObservation{r->async_error ? domain::SessionState::Error : running ? domain::SessionState::Running : domain::SessionState::Stopped, session.id + ":" + std::to_string(r->generation), r->terminal_reason, r->async_error};
+}
+
 void Gr4RuntimeManager::prepare(const domain::Session& session) {
     auto resources = get_or_create_resources(session);
     std::lock_guard resource_lock(resources->mutex);
@@ -744,7 +768,10 @@ void Gr4RuntimeManager::start(const domain::Session& session) {
     resources->teardown_error.reset();
     resources->teardown_complete = false;
     resources->lifecycle_phase = LifecyclePhase::Starting;
-    execution.scheduler->start();
+    if (auto started = execution.scheduler->start(); !started) {
+        resources->lifecycle_phase = LifecyclePhase::Failed;
+        throw runtime_error(session, "start", started.error().message);
+    }
     execution.running = true;
     resources->lifecycle_phase = LifecyclePhase::Running;
 }
@@ -912,12 +939,7 @@ void Gr4RuntimeManager::set_block_settings(const domain::Session& session,
     const auto* endpoint = mode == BlockSettingsMode::Staged ? gr::block::property::kStagedSetting
                                                              : gr::block::property::kSetting;
     try {
-        const auto reply = send_block_settings_request<gr::message::Command::Set>(
-            *scheduler_block,
-            runtime_block_id,
-            endpoint,
-            patch,
-            std::chrono::milliseconds(1000));
+        const auto reply = send_block_settings_request<gr::message::Command::Set>(execution->request_port, *scheduler_block, runtime_block_id, endpoint, patch, std::chrono::milliseconds(1000));
         (void)parse_settings_reply(reply, runtime_block_id, endpoint);
     } catch (const BlockNotFoundError&) {
         throw;
@@ -929,11 +951,21 @@ void Gr4RuntimeManager::set_block_settings(const domain::Session& session,
 }
 
 gr::property_map Gr4RuntimeManager::get_block_settings(const domain::Session& session, const std::string& block_target) {
+    (void)observe(session);
     auto resources = find_resources(session.id);
     if (!resources) {
         throw runtime_error(session, "settings read", "session runtime is not running");
     }
     std::lock_guard resource_lock(resources->mutex);
+    if (resources->terminal_reason) {
+        auto       alias = resources->terminal_aliases.find(block_target);
+        const auto key   = alias == resources->terminal_aliases.end() ? block_target : alias->second;
+        auto       found = resources->terminal_settings.find(key);
+        if (found == resources->terminal_settings.end()) {
+            throw BlockNotFoundError("block not found in terminal execution: " + block_target);
+        }
+        return found->second;
+    }
     auto* execution = resources->execution.get();
     if (execution == nullptr || !execution->running || resources->lifecycle_phase != LifecyclePhase::Running) {
         throw runtime_error(session, "settings read", "session runtime is not running");
@@ -951,12 +983,7 @@ gr::property_map Gr4RuntimeManager::get_block_settings(const domain::Session& se
     const auto runtime_block_id = std::string(resolved_block->uniqueName());
 
     try {
-        const auto reply = send_block_settings_request<gr::message::Command::Get>(
-            *scheduler_block,
-            runtime_block_id,
-            gr::block::property::kSetting,
-            {},
-            std::chrono::milliseconds(1000));
+        const auto reply = send_block_settings_request<gr::message::Command::Get>(execution->request_port, *scheduler_block, runtime_block_id, gr::block::property::kSetting, {}, std::chrono::milliseconds(1000));
         return parse_settings_reply(reply, runtime_block_id, gr::block::property::kSetting);
     } catch (const BlockNotFoundError&) {
         throw;
@@ -1029,6 +1056,13 @@ Gr4RuntimeManager::Execution& Gr4RuntimeManager::prepare_locked(const domain::Se
             throw runtime_error(session, "prepare", "scheduler not found: " + scheduler_alias);
         }
         execution->scheduler->setGraph(std::move(*graph));
+        auto* scheduler_block = execution->scheduler->asBlockModel();
+        if (scheduler_block == nullptr) {
+            throw runtime_error(session, "prepare", "scheduler does not expose a runtime block model");
+        }
+        if (auto connection = execution->request_port.connect(*scheduler_block->msgIn); !connection_succeeded(connection)) {
+            throw runtime_error(session, "prepare", std::format("failed to connect runtime request port: {}", connection_error_message(connection)));
+        }
     } catch (const std::exception& error) {
         for (const auto& binding : stream_bindings) {
             stream_allocator_.release(binding.internal);
@@ -1038,11 +1072,100 @@ Gr4RuntimeManager::Execution& Gr4RuntimeManager::prepare_locked(const domain::Se
 
     resources.execution = std::move(execution);
     resources.stream_bindings = std::move(stream_bindings);
-    resources.generation += 1;
+    {
+        std::lock_guard lock(resources_mutex_);
+        if (next_generation_ == UINT64_MAX) {
+            throw runtime_error(session, "prepare", "execution generation exhausted");
+        }
+        resources.generation = ++next_generation_;
+    }
+    resources.terminal_settings.clear();
+    resources.terminal_aliases.clear();
+    resources.terminal_reason.reset();
+    resources.async_error.reset();
     resources.lifecycle_phase = LifecyclePhase::Idle;
     resources.teardown_complete = true;
     resources.teardown_error.reset();
     return *resources.execution;
+}
+
+// Native settings are copied only after scheduler join. One latest execution per session,
+// 16 MiB total, 4 MiB per block, depth 24 and 262144 values. A failed capture is explicit.
+void Gr4RuntimeManager::capture_terminal_locked(const domain::Session& session, SessionRuntimeResources& r, std::string_view reason) {
+    r.terminal_reason = std::string(reason);
+    std::size_t total = 0, blocks = 0;
+    auto        root    = r.execution->scheduler->asBlockModel();
+    auto        capture = [&](auto&& self, const gr::BlockModel& group) -> void {
+        for (const auto& block : group.blocks()) {
+            if (++blocks > 512) {
+                throw std::runtime_error("terminal block count limit exceeded");
+            }
+            const std::string id(block->uniqueName());
+            if (id.size() > 512) {
+                throw std::runtime_error("terminal block identity limit exceeded");
+            }
+            gr::property_map terminal;
+            std::size_t      bytes = 0, nodes = 0;
+            auto             bound = [&](auto&& visit, const gr::pmt::Value& value, std::size_t depth) -> void {
+                if (depth > 24 || ++nodes > 262144) {
+                    throw std::runtime_error("terminal metadata structural limit exceeded");
+                }
+                bytes += 32;
+                gr::pmt::ValueVisitor([&](const auto& v) {
+                    using T = std::decay_t<decltype(v)>;
+                    if constexpr (std::same_as<T, gr::property_map>) {
+                        for (const auto& [key, item] : v) {
+                            bytes += key.size();
+                            visit(visit, item, depth + 1);
+                        }
+                    } else if constexpr (std::same_as<T, std::string> || std::same_as<T, std::pmr::string> || std::same_as<T, std::string_view>) {
+                        bytes += v.size();
+                    } else if constexpr (!std::is_arithmetic_v<T> && !std::same_as<T, std::monostate>) {
+                        throw std::runtime_error("unsupported terminal settings value");
+                    }
+                }).visit(value);
+                if (bytes > 4 * 1024 * 1024 || total + bytes > 16 * 1024 * 1024) {
+                    throw std::runtime_error("terminal metadata byte limit exceeded");
+                }
+            };
+            // Some ordinary settings (e.g. vector parameters) are unsupported by the existing
+            // settings HTTP contract. Report those keys rather than discard finalization silently.
+            gr::property_map failures;
+            block->settings().updateActiveParameters(); // refresh readable members after finalization, without requiring a block-specific publish hook
+            for (const auto& [key, value] : block->settings().get()) {
+                const auto before = bytes;
+                try {
+                    bound(bound, value, 0);
+                    terminal[key] = value;
+                } catch (const std::exception& e) {
+                    bytes = before;
+                    if (failures.size() < 64) {
+                        failures[key.substr(0, 512)] = std::string(e.what());
+                    } else {
+                        failures["__additional_fields_unavailable"] = true;
+                    }
+                }
+            }
+            total += bytes;
+            terminal["__gr4cp_terminal"] = gr::property_map{{"session_id", session.id}, {"execution_id", session.id + ":" + std::to_string(r.generation)}, {"generation", r.generation}, {"block_unique_name", id}, {"reason", std::string(reason)}, {"capture_complete", failures.empty()}, {"unavailable_fields", std::move(failures)}};
+            r.terminal_settings[id]      = std::move(terminal);
+            auto alias                   = [&](std::string name) {
+                if (!name.empty()) {
+                    if (auto it = r.terminal_aliases.find(name); it != r.terminal_aliases.end() && it->second != id) {
+                        it->second = "";
+                    } else {
+                        r.terminal_aliases.emplace(std::move(name), id);
+                    }
+                }
+            };
+            alias(std::string(block->name()));
+            alias(id);
+            if (!block->blocks().empty()) {
+                self(self, *block);
+            }
+        }
+    };
+    capture(capture, *root);
 }
 
 void Gr4RuntimeManager::release_stream_bindings_locked(SessionRuntimeResources& resources) {
@@ -1076,7 +1199,10 @@ void Gr4RuntimeManager::stop_locked(const domain::Session& session,
 
     if (execution->running) {
         try {
-            execution->scheduler->stop();
+            if (!execution->scheduler->stopAfterDrain(std::chrono::seconds(5))) {
+                resources.async_error     = "downstream drain deadline exceeded";
+                resources.terminal_reason = "stop_timeout";
+            }
         } catch (const std::exception& error) {
             resources.lifecycle_phase = LifecyclePhase::Failed;
             resources.teardown_error = std::format("failed to stop scheduler: {}", error.what());
@@ -1087,6 +1213,20 @@ void Gr4RuntimeManager::stop_locked(const domain::Session& session,
     execution = resources.execution.get();
     if (execution) {
         execution->running = false;
+    }
+    const auto reason = resources.terminal_reason.value_or("stopped");
+    if (execution->scheduler->asBlockModel()->state() == gr::lifecycle::State::ERROR) {
+        const auto error          = execution->scheduler->startError();
+        resources.async_error     = error ? error->message : std::string("scheduler execution failed");
+        resources.terminal_reason = "error";
+    }
+    try {
+        capture_terminal_locked(session, resources, resources.terminal_reason.value_or(reason));
+    } catch (const std::exception& error) {
+        resources.async_error     = std::string("terminal capture failed: ") + error.what();
+        resources.terminal_reason = "capture_error";
+        resources.terminal_settings.clear();
+        resources.terminal_aliases.clear();
     }
     release_stream_bindings_locked(resources);
     resources.execution.reset();

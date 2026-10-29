@@ -16,6 +16,8 @@
 #include <vector>
 
 #include <boost/asio.hpp>
+#include <boost/uuid/random_generator.hpp>
+#include <boost/uuid/uuid_io.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/beast/version.hpp>
@@ -33,6 +35,12 @@ namespace beast = boost::beast;
 namespace http = beast::http;
 namespace websocket = beast::websocket;
 using tcp = asio::ip::tcp;
+
+// One identity for this server process, independent of session/execution IDs.
+const std::string& server_instance_id() {
+    static const std::string identity = boost::uuids::to_string(boost::uuids::random_generator{}());
+    return identity;
+}
 
 Json stream_to_json(const domain::BrowserStreamDescriptor& stream) {
     return Json{
@@ -173,6 +181,7 @@ Json schedulers_to_json(const std::vector<domain::SchedulerDescriptor>& schedule
 Json session_to_json(const domain::Session& session, const std::optional<domain::StreamRuntimePlan>& stream_plan = std::nullopt) {
     auto body = Json{
         {"id", session.id},
+        {"server_instance_id", server_instance_id()},
         {"name", session.name},
         {"state", domain::to_string(session.state)},
         {"created_at", domain::format_timestamp_utc(session.created_at)},
@@ -180,6 +189,8 @@ Json session_to_json(const domain::Session& session, const std::optional<domain:
         {"last_error", session.last_error ? Json(*session.last_error) : Json(nullptr)},
     };
 
+    if(session.execution_id)body["execution_id"]=*session.execution_id;
+    if(session.completion_reason)body["completion_reason"]=*session.completion_reason;
     if (session.scheduler_alias.has_value()) {
         body["scheduler_id"] = *session.scheduler_alias;
     }
@@ -389,7 +400,7 @@ void register_routes(httplib::Server& server,
                      app::SchedulerCatalogService& scheduler_catalog_service,
                      app::BlockSettingsService& block_settings_service) {
     server.Get("/healthz", [](const httplib::Request&, httplib::Response& response) {
-        set_json_response(response, Json{{"ok", true}});
+        set_json_response(response, Json{{"ok", true}, {"server_instance_id", server_instance_id()}});
     });
 
     server.Get("/blocks", [&block_catalog_service](const httplib::Request&, httplib::Response& response) {
@@ -650,6 +661,12 @@ private:
             finish_if_idle();
             return;
         }
+        // Keep a non-reading peer from pinning a pending forwarding write forever.
+        const websocket::stream_base::timeout timeout{std::chrono::seconds(2),std::chrono::seconds(10),true};
+        browser_.set_option(timeout);internal_.set_option(timeout);
+        // Managed block snapshots and Studio's JSON reducers are bounded at
+        // 128 MiB. Beast's implicit 16 MiB limit rejected valid reconnect state.
+        internal_.read_message_max(128ULL * 1024 * 1024);
         read_browser();
         read_internal();
     }
@@ -692,7 +709,7 @@ private:
         internal_.async_read(internal_buffer_, [self = shared_from_this()](const beast::error_code& error, std::size_t) {
             --self->pending_operations_;
             if (error) {
-                self->begin_close();
+                self->begin_close(error==websocket::error::closed && self->internal_.reason().code==websocket::close_code::normal);
                 self->finish_if_idle();
                 return;
             }
@@ -714,7 +731,7 @@ private:
         });
     }
 
-    void begin_close() {
+    void begin_close(bool graceful = false) {
         if (closing_) {
             finish_if_idle();
             return;
@@ -722,8 +739,19 @@ private:
         closing_ = true;
 
         beast::error_code error;
-        browser_.next_layer().socket().shutdown(tcp::socket::shutdown_both, error);
-        browser_.next_layer().socket().close(error);
+        if(graceful) {
+            // read_internal() runs only after the previous browser write completed.
+            // Preserve normal EOS through the proxy; the close handshake is bounded.
+            browser_.set_option(websocket::stream_base::timeout{std::chrono::seconds(2),std::chrono::seconds(10),true});
+            ++pending_operations_;
+            browser_.async_close(websocket::close_code::normal,[self=shared_from_this()](beast::error_code){
+                --self->pending_operations_;beast::error_code ec;
+                self->browser_.next_layer().socket().close(ec);self->finish_if_idle();
+            });
+        } else {
+            browser_.next_layer().socket().shutdown(tcp::socket::shutdown_both, error);
+            browser_.next_layer().socket().close(error);
+        }
         internal_.next_layer().socket().shutdown(tcp::socket::shutdown_both, error);
         internal_.next_layer().socket().close(error);
         finish_if_idle();
