@@ -567,6 +567,10 @@ bool inject_stream_bindings(gr::property_map& root, const std::vector<domain::Ru
             if (binding.plan.block_instance_name != *name) {
                 continue;
             }
+            // Stream descriptors belong to the control plane, not GR4 block settings.
+            parameters.erase("stream");
+            parameters.erase("stream_id");
+            parameters.erase("payload_format");
             parameters["endpoint"] = binding.internal.endpoint;
             parameters["transport"] = binding.plan.transport;
             (*block)["parameters"] = parameters;

@@ -847,6 +847,7 @@ std::vector<domain::BlockParameterDescriptor> to_parameters(gr::BlockModel& bloc
     std::vector<domain::BlockParameterDescriptor> descriptors;
     (void)block.settings().applyStagedParameters();
     const auto settings = block.settings().get();
+    const auto  writable         = block.settings().writableMembers();
     const auto& meta_information = block.metaInformation();
     descriptors.reserve(settings.size());
     for (const auto& [name, value] : settings) {
@@ -857,6 +858,9 @@ std::vector<domain::BlockParameterDescriptor> to_parameters(gr::BlockModel& bloc
             parameter_default_value(value),
             parameter_summary(meta_information, name));
         descriptor.runtime_mutability = parameter_runtime_mutability(name);
+        if (!descriptor.runtime_mutability.has_value() && !writable.contains(std::string(name))) {
+            descriptor.runtime_mutability = "read_only";
+        }
         descriptor.value_kind = parameter_value_kind(value);
         if (const auto enum_choices = parameter_enum_choices(meta_information, name); enum_choices.has_value()) {
             descriptor.enum_choices = *enum_choices;
