@@ -241,23 +241,24 @@ TEST_F(Gr4RuntimeManagerTest, CompatibilityStudioInlineGraphShapeIsNormalizedBef
 TEST_F(Gr4RuntimeManagerTest, RunningSessionSupportsBlockSettingsMessageRoundTrip) {
     auto session = make_session("runtime_block_settings", continuous_graph_yaml());
 
-    runtime_.prepare(session);
-    runtime_.start(session);
-    std::this_thread::sleep_for(100ms);
+    // Reuse one ingress during a run, then rebuild it for the next execution.
+    // All requests target the software SignalGenerator, never external hardware.
+    for (int execution = 0; execution < 2; ++execution) {
+        runtime_.prepare(session);
+        runtime_.start(session);
+        std::this_thread::sleep_for(100ms);
 
-    EXPECT_NO_THROW(runtime_.set_block_settings(
-        session,
-        "src0",
-        gr::property_map{{"tone_frequency", 1250.0}, {"amplitude", 0.5}},
-        gr4cp::runtime::BlockSettingsMode::Staged));
+        for (const double frequency : {1250.0, 1300.0, 1350.0}) {
+            ASSERT_NO_THROW(runtime_.set_block_settings(session, "src0", gr::property_map{{"tone_frequency", frequency}, {"amplitude", 0.5}}, gr4cp::runtime::BlockSettingsMode::Staged));
 
-    const auto settings = runtime_.get_block_settings(session, "src0");
-    ASSERT_TRUE(settings.contains("tone_frequency"));
-    ASSERT_TRUE(settings.contains("amplitude"));
-    EXPECT_EQ(settings.at("tone_frequency").value_or(0.0F), 1250.0F);
-    EXPECT_EQ(settings.at("amplitude").value_or(0.0F), 0.5F);
-
-    runtime_.stop(session);
+            const auto settings = runtime_.get_block_settings(session, "src0");
+            ASSERT_TRUE(settings.contains("tone_frequency"));
+            ASSERT_TRUE(settings.contains("amplitude"));
+            EXPECT_EQ(settings.at("tone_frequency").value_or(0.0F), static_cast<float>(frequency));
+            EXPECT_EQ(settings.at("amplitude").value_or(0.0F), 0.5F);
+        }
+        runtime_.stop(session);
+    }
     runtime_.destroy(session);
 }
 
