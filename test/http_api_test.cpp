@@ -929,6 +929,30 @@ protected:
         return stream;
     }
 
+    tcp::socket connect_raw_client() {
+        tcp::socket socket(ws_io_context_);
+        socket.connect(tcp::endpoint(asio::ip::make_address("127.0.0.1"), static_cast<unsigned short>(port)));
+        return socket;
+    }
+
+    // Stops the server on another thread and reports whether stop returned within the bound. The clients'
+    // sockets close before this returns. A stop that waits on them then ends either way.
+    bool stop_returns_while_clients_stay_open(std::vector<tcp::socket>& clients, const std::chrono::milliseconds bound) {
+        // The server accepts connections in order. Once a later request is served, it has accepted every client.
+        const auto served = client->Get("/healthz");
+        EXPECT_TRUE(served && served->status == 200);
+
+        auto stopped = std::async(std::launch::async, [this]() { server->stop(); });
+        const bool returned = stopped.wait_for(bound) == std::future_status::ready;
+        for (auto& socket : clients) {
+            beast::error_code error;
+            socket.shutdown(tcp::socket::shutdown_both, error);
+            socket.close(error);
+        }
+        stopped.get();
+        return returned;
+    }
+
     static std::string read_websocket_text(websocket::stream<beast::tcp_stream>& stream) {
         beast::flat_buffer buffer;
         stream.read(buffer);
@@ -1876,6 +1900,30 @@ TEST_F(HttpApiTest, SequentialRequestsDoNotKeepFinishedConnectionThreads) {
         << "the virtual size grew by " << growth << " bytes over " << kMeasuredRequests << " requests, with a thread stack of "
         << *stack_size << " bytes";
 #endif
+}
+
+// A stop with no client connected returns in a few tens of milliseconds. The bound is far above that, and a stop that
+// waits on a client never returns within it.
+constexpr std::chrono::milliseconds kStopBound{2000};
+
+TEST_F(HttpApiTest, StopReturnsWhileAClientSendsNothing) {
+    std::vector<tcp::socket> clients;
+    clients.push_back(connect_raw_client());
+
+    EXPECT_TRUE(stop_returns_while_clients_stay_open(clients, kStopBound))
+        << "stop waited on a connection that sent no request";
+}
+
+TEST_F(HttpApiTest, StopReturnsWhileAClientHasSentHalfARequest) {
+    const std::string body = R"({"name":"demo","grc":"flowgraph"})";
+    const std::string head = "POST /sessions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: " +
+                             std::to_string(body.size()) + "\r\n\r\n";
+    std::vector<tcp::socket> clients;
+    clients.push_back(connect_raw_client());
+    asio::write(clients.back(), asio::buffer(head + body.substr(0, body.size() / 2U)));
+
+    EXPECT_TRUE(stop_returns_while_clients_stay_open(clients, kStopBound))
+        << "stop waited on a connection that sent half a request";
 }
 
 TEST_F(HttpApiTest, GetBlocksSuccess) {
