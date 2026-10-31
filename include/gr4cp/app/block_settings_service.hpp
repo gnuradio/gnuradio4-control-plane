@@ -39,8 +39,8 @@ private:
 
     static gr::property_map json_to_property_map(const Json& value);
     static gr::pmt::Value json_to_pmt_value(const Json& value);
-    static Json property_map_to_json(const gr::property_map& value);
-    static Json pmt_value_to_json(const gr::pmt::Value& value);
+    static Json             property_map_to_json(const gr::property_map& value, bool exact = false);
+    static Json             pmt_value_to_json(const gr::pmt::Value& value, bool exact = false);
 
     storage::SessionRepository& repository_;
     runtime::RuntimeManager& runtime_manager_;

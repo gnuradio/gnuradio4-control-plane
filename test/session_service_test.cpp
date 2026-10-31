@@ -32,6 +32,8 @@ connections: []
 
 class FakeRuntimeManager final : public gr4cp::runtime::RuntimeManager {
 public:
+    std::optional<gr4cp::runtime::ExecutionObservation> observation;
+    std::optional<gr4cp::runtime::ExecutionObservation> observe(const gr4cp::domain::Session&) override { return observation; }
     void prepare(const gr4cp::domain::Session& session) override {
         if (const auto contract_error = gr4cp::domain::validate_stream_runtime_contract(session); contract_error.has_value()) {
             throw std::runtime_error(*contract_error);
@@ -375,6 +377,23 @@ TEST_F(SessionServiceTest, StartFailsExplicitlyForUnsupportedAuthoredTransport) 
     EXPECT_EQ(stored->state, gr4cp::domain::SessionState::Error);
     ASSERT_TRUE(stored->last_error.has_value());
     EXPECT_NE(stored->last_error->find("managed stream transport is not supported"), std::string::npos);
+}
+
+TEST_F(SessionServiceTest, NaturalCompletionAndFailureReconcileOnGetAndList) {
+    auto session = service.create("finite", "blocks: []");
+    service.start(session.id);
+    runtime.observation = gr4cp::runtime::ExecutionObservation{gr4cp::domain::SessionState::Stopped, "execution:1", "completed", std::nullopt};
+    auto ended          = service.get(session.id);
+    EXPECT_EQ(ended.state, gr4cp::domain::SessionState::Stopped);
+    EXPECT_EQ(ended.completion_reason, "completed");
+    EXPECT_EQ(ended.execution_id, "execution:1");
+    runtime.observation.reset();
+    service.start(session.id);
+    runtime.observation = gr4cp::runtime::ExecutionObservation{gr4cp::domain::SessionState::Error, "execution:2", "error", "worker failed"};
+    auto listed         = service.list();
+    ASSERT_EQ(listed.size(), 1);
+    EXPECT_EQ(listed[0].state, gr4cp::domain::SessionState::Error);
+    EXPECT_EQ(listed[0].last_error, "worker failed");
 }
 
 }  // namespace

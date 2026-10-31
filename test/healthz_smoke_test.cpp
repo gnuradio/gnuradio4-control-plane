@@ -60,7 +60,16 @@ TEST(HealthzSmokeTest, ReturnsOkJson) {
     EXPECT_EQ(response->status, 200);
     EXPECT_EQ(response->get_header_value("Content-Type"), "application/json");
     const auto body = nlohmann::json::parse(response->body);
-    EXPECT_EQ(body, nlohmann::json({{"ok", true}}));
+    EXPECT_EQ(body.at("ok"), true);
+    ASSERT_TRUE(body.at("server_instance_id").is_string());
+    EXPECT_FALSE(body.at("server_instance_id").get<std::string>().empty());
+    const auto again = client.Get("/healthz");
+    ASSERT_TRUE(again);
+    EXPECT_EQ(nlohmann::json::parse(again->body), body);
+    const auto session = client.Post("/sessions", R"({"name":"identity-check","grc":"graph"})", "application/json");
+    ASSERT_TRUE(session);
+    ASSERT_EQ(session->status, 201);
+    EXPECT_EQ(nlohmann::json::parse(session->body).at("server_instance_id"), body.at("server_instance_id"));
 
     server.stop();
     if (server_thread.joinable()) {

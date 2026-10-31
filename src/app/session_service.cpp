@@ -93,6 +93,9 @@ domain::Session SessionService::create(const std::string& name,
 std::vector<domain::Session> SessionService::list() {
     std::lock_guard lock(mutex_);
     auto sessions = repository_.list();
+    for (auto& session : sessions) {
+        session = load_or_throw(session.id);
+    }
     std::sort(sessions.begin(), sessions.end(), [](const domain::Session& left, const domain::Session& right) {
         if (left.created_at == right.created_at) {
             return left.id < right.id;
@@ -143,7 +146,7 @@ domain::Session SessionService::start(const std::string& id) {
         session.last_error.reset();
         session.updated_at = now_utc();
         store_session_locked(session, InternalLifecyclePhase::Running);
-        return session;
+        return load_or_throw(id);
     }
 }
 
@@ -179,6 +182,10 @@ domain::Session SessionService::stop(const std::string& id) {
         std::lock_guard lock(mutex_);
         session = load_or_throw(id);
         session.state = domain::SessionState::Stopped;
+        if (auto observed = runtime_manager_.observe(session)) {
+            session.execution_id      = observed->execution_id;
+            session.completion_reason = observed->completion_reason;
+        }
         session.last_error.reset();
         session.updated_at = now_utc();
         store_session_locked(session, InternalLifecyclePhase::Idle);
@@ -224,7 +231,7 @@ domain::Session SessionService::restart(const std::string& id) {
         session.last_error.reset();
         session.updated_at = now_utc();
         store_session_locked(session, InternalLifecyclePhase::Running);
-        return session;
+        return load_or_throw(id);
     }
 }
 
@@ -338,7 +345,20 @@ domain::Session SessionService::load_or_throw(const std::string& id) {
     if (!session.has_value()) {
         throw NotFoundError("session not found: " + id);
     }
-    return *session;
+    auto result = *session;
+    if (phase_for_locked(result) == InternalLifecyclePhase::Running) {
+        if (auto observed = runtime_manager_.observe(result)) {
+            result.execution_id      = observed->execution_id;
+            result.completion_reason = observed->completion_reason;
+            result.last_error        = observed->error;
+            if (result.state != observed->state) {
+                result.state      = observed->state;
+                result.updated_at = now_utc();
+            }
+            store_session_locked(result, result.state == domain::SessionState::Running ? InternalLifecyclePhase::Running : result.state == domain::SessionState::Error ? InternalLifecyclePhase::Failed : InternalLifecyclePhase::Idle);
+        }
+    }
+    return result;
 }
 
 [[noreturn]] void SessionService::record_runtime_failure(domain::Session session, const std::string& message) {

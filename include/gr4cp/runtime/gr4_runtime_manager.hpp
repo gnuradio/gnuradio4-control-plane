@@ -19,6 +19,7 @@ public:
     explicit Gr4RuntimeManager(std::vector<std::filesystem::path> plugin_directories = {});
     ~Gr4RuntimeManager() override;
 
+    std::optional<ExecutionObservation>      observe(const domain::Session& session) override;
     void prepare(const domain::Session& session) override;
     void start(const domain::Session& session) override;
     void stop(const domain::Session& session) override;
@@ -48,6 +49,7 @@ private:
     std::shared_ptr<SessionRuntimeResources> get_or_create_resources(const domain::Session& session);
     std::shared_ptr<SessionRuntimeResources> find_resources(const std::string& session_id);
     Execution& prepare_locked(const domain::Session& session, SessionRuntimeResources& resources);
+    void                                     capture_terminal_locked(const domain::Session&, SessionRuntimeResources&, std::string_view reason);
     void release_stream_bindings_locked(SessionRuntimeResources& resources);
     void stop_locked(const domain::Session& session,
                      SessionRuntimeResources& resources,
@@ -57,6 +59,7 @@ private:
     StreamBindingAllocator stream_allocator_;
     std::unordered_map<std::string, std::shared_ptr<SessionRuntimeResources>> resources_;
     std::mutex resources_mutex_;
+    std::uint64_t                                                             next_generation_ = 0;
 };
 
 }  // namespace gr4cp::runtime
