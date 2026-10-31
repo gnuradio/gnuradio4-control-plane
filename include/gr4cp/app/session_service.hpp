@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -56,14 +57,26 @@ private:
         Starting,
         Running,
         Stopping,
-        Failed,
+        Failed,     // a start, a restart or a removal failed
+        RunFailed,  // the run ended with an error or its stop failed, and a stop answers the session as it stands
     };
 
     InternalLifecyclePhase phase_for_locked(const domain::Session& session);
+    // Updates a running session from its run: the last error a block reported, and the run's end. An ended run goes
+    // to `ended_runs`, which the caller destroys after releasing the mutex. A caller declares the vector before its
+    // lock, or clears it after the lock is released.
+    domain::Session observe_locked(domain::Session session, std::vector<std::shared_ptr<void>>& ended_runs);
+    // Reads the session as `get` does. Returns it when its run is in progress, and nothing otherwise.
+    std::optional<domain::Session> running_session(const std::string& id);
     domain::Session load_or_throw(const std::string& id);
     void store_session_locked(const domain::Session& session, InternalLifecyclePhase phase);
     void erase_phase_locked(const std::string& id);
-    [[noreturn]] void record_runtime_failure(domain::Session session, const std::string& message);
+    // Records the session in error with `message` in `phase`, with `reason` as its completion reason: an error for a
+    // stop or a removal that failed, none for a start or a restart that failed. Throws RuntimeError with `message`.
+    [[noreturn]] void record_runtime_failure(domain::Session session,
+                                             const std::string& message,
+                                             std::optional<domain::CompletionReason> reason,
+                                             InternalLifecyclePhase phase = InternalLifecyclePhase::Failed);
 
     storage::SessionRepository& repository_;
     runtime::RuntimeManager& runtime_manager_;

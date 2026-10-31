@@ -1,13 +1,14 @@
 #include "gr4cp/catalog/gr4_block_catalog_provider.hpp"
 #include "gr4cp/catalog/gr4_block_catalog_provider_detail.hpp"
+#include "gr4cp/runtime/plugin_loader.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cctype>
-#include <cstdlib>
-#include <filesystem>
+#include <functional>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -16,7 +17,6 @@
 #include <vector>
 
 #if defined(__unix__) || defined(__APPLE__)
-#include <dlfcn.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -29,292 +29,6 @@
 namespace gr4cp::catalog {
 
 namespace {
-
-std::vector<std::filesystem::path> split_plugin_directories(std::string_view paths) {
-    std::vector<std::filesystem::path> directories;
-    std::size_t start = 0;
-    while (start <= paths.size()) {
-        const auto end = paths.find(':', start);
-        const auto token = paths.substr(start, end == std::string_view::npos ? paths.size() - start : end - start);
-        if (!token.empty()) {
-            directories.emplace_back(token);
-        }
-        if (end == std::string_view::npos) {
-            break;
-        }
-        start = end + 1;
-    }
-    return directories;
-}
-
-std::vector<std::filesystem::path> default_plugin_directories() {
-    if (const char* env = std::getenv("GNURADIO4_PLUGIN_DIRECTORIES"); env != nullptr && *env != '\0') {
-        return split_plugin_directories(env);
-    }
-#if defined(GR4CP_DEFAULT_GNURADIO4_PLUGIN_DIR)
-    return split_plugin_directories(GR4CP_DEFAULT_GNURADIO4_PLUGIN_DIR);
-#else
-    return {};
-#endif
-}
-
-std::mutex& loader_pool_mutex() {
-    static std::mutex mutex;
-    return mutex;
-}
-
-std::vector<std::unique_ptr<gr::PluginLoader>>& loader_pool() {
-    static std::vector<std::unique_ptr<gr::PluginLoader>> pool;
-    return pool;
-}
-
-std::shared_ptr<gr::BlockModel> instantiate_from_retained_loaders(std::string_view block_type, const gr::property_map& params) {
-    std::lock_guard lock(loader_pool_mutex());
-    for (auto it = loader_pool().rbegin(); it != loader_pool().rend(); ++it) {
-        if (auto model = (*it)->instantiate(block_type, params)) {
-            return model;
-        }
-    }
-    return {};
-}
-
-#if !defined(__EMSCRIPTEN__)
-
-bool is_shared_library(const std::filesystem::path& path) {
-#if defined(__APPLE__)
-    constexpr auto extension = ".dylib";
-#elif defined(_WIN32)
-    constexpr auto extension = ".dll";
-#else
-    constexpr auto extension = ".so";
-#endif
-    return path.extension() == extension;
-}
-
-struct CandidateLibraries {
-    std::vector<std::filesystem::path> likely_libraries;
-    std::vector<std::filesystem::path> staged_libraries;
-    std::vector<std::filesystem::path> staged_plugin_libraries;
-    std::vector<std::filesystem::path> staged_shared_libraries;
-    std::filesystem::path plugin_staging_directory;
-    std::filesystem::path shared_staging_directory;
-};
-
-gr::PluginLoader* retain_loader(std::unique_ptr<gr::PluginLoader> loader) {
-    std::lock_guard lock(loader_pool_mutex());
-    auto& pool = loader_pool();
-    pool.push_back(std::move(loader));
-    return pool.back().get();
-}
-
-std::vector<std::string> available_blocks_from_retained_loaders() {
-    std::lock_guard lock(loader_pool_mutex());
-    std::vector<std::string> blocks;
-    for (const auto& loader : loader_pool()) {
-        const auto loader_blocks = loader->availableBlocks();
-        blocks.insert(blocks.end(), loader_blocks.begin(), loader_blocks.end());
-    }
-    std::sort(blocks.begin(), blocks.end());
-    blocks.erase(std::unique(blocks.begin(), blocks.end()), blocks.end());
-    return blocks;
-}
-
-void prepend_library_search_path(const std::vector<std::filesystem::path>& plugin_directories) {
-#if !defined(_WIN32)
-    std::string value;
-    for (const auto& directory : plugin_directories) {
-        if (!value.empty()) {
-            value += ":";
-        }
-        value += directory.string();
-    }
-    if (const char* existing = std::getenv("LD_LIBRARY_PATH"); existing != nullptr && *existing != '\0') {
-        if (!value.empty()) {
-            value += ":";
-        }
-        value += existing;
-    }
-    if (!value.empty()) {
-        ::setenv("LD_LIBRARY_PATH", value.c_str(), 1);
-    }
-#else
-    (void)plugin_directories;
-#endif
-}
-
-void preload_support_libraries(const std::vector<std::filesystem::path>& plugin_directories) {
-#if defined(__unix__) || defined(__APPLE__)
-    static std::vector<void*> handles;
-    static std::set<std::string> loaded_libraries;
-
-    auto should_preload = [](const std::filesystem::path& path) {
-        const auto name = path.filename().string();
-        return name == "libgnuradio-blocklib-core.so" || name == "libgnuradio-plugin.so";
-    };
-
-    for (const auto& directory : plugin_directories) {
-        if (!std::filesystem::is_directory(directory)) {
-            continue;
-        }
-        for (const auto& entry : std::filesystem::directory_iterator(directory)) {
-            if (!entry.is_regular_file() || !should_preload(entry.path())) {
-                continue;
-            }
-            const auto library = entry.path().string();
-            if (!loaded_libraries.insert(library).second) {
-                continue;
-            }
-            void* handle = ::dlopen(library.c_str(), RTLD_NOW | RTLD_GLOBAL);
-            if (handle == nullptr) {
-                loaded_libraries.erase(library);
-                const char* error = ::dlerror();
-                throw CatalogLoadError("failed to preload GNU Radio 4 support library " + library +
-                                       (error != nullptr ? ": " + std::string(error) : ""));
-            }
-            handles.push_back(handle);
-        }
-    }
-#else
-    (void)plugin_directories;
-#endif
-}
-
-bool is_likely_gr4_library(const std::filesystem::path& path) {
-    if (!is_shared_library(path)) {
-        return false;
-    }
-    const auto name = path.filename().string();
-    if (name.rfind("libGr", 0) == 0) {
-        return name.find("Shared") != std::string::npos || name.find("Plugin") != std::string::npos;
-    }
-    if (name.rfind("libGood", 0) == 0 && name.find("Plugin") != std::string::npos) {
-        return true;
-    }
-    return false;
-}
-
-bool is_plugin_library(const std::filesystem::path& path) {
-    return is_shared_library(path) && path.filename().string().find("Plugin") != std::string::npos;
-}
-
-bool is_shared_block_library(const std::filesystem::path& path) {
-    return is_shared_library(path) && path.filename().string().find("Shared") != std::string::npos;
-}
-
-std::filesystem::path create_stage_directory() {
-    const auto base = std::filesystem::temp_directory_path() /
-                      ("gr4cp-gr4-stage-" + std::to_string(::getpid()) + "-" +
-                       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-    std::filesystem::create_directories(base);
-    return base;
-}
-
-std::filesystem::path stage_library(const std::filesystem::path& source, const std::filesystem::path& destination) {
-    std::error_code error;
-    std::filesystem::create_symlink(source, destination, error);
-    if (!error) {
-        return destination;
-    }
-    error.clear();
-    std::filesystem::copy_file(source, destination, std::filesystem::copy_options::overwrite_existing, error);
-    if (error) {
-        throw CatalogLoadError("failed to stage GNU Radio 4 library: " + source.string());
-    }
-    return destination;
-}
-
-std::string module_name_from_library(const std::filesystem::path& path) {
-    std::string name = path.filename().string();
-    if (name.rfind("lib", 0) == 0) {
-        name = name.substr(3);
-    }
-    if (name.ends_with(".so")) {
-        name.resize(name.size() - 3);
-    } else if (name.ends_with(".dylib")) {
-        name.resize(name.size() - 6);
-    }
-    if (name.ends_with("Shared")) {
-        name.resize(name.size() - 6);
-    }
-    return name;
-}
-
-void bootstrap_blocklib_symbols(const std::vector<std::filesystem::path>& staged_libraries) {
-#if defined(__unix__) || defined(__APPLE__)
-    static std::vector<void*> handles;
-    static std::set<std::string> retained;
-
-    using init_fn_t = std::size_t (*)(gr::BlockRegistry&);
-
-    for (const auto& library : staged_libraries) {
-        const auto library_string = library.string();
-        if (!retained.insert(library_string).second) {
-            continue;
-        }
-        void* handle = ::dlopen(library_string.c_str(), RTLD_NOW | RTLD_GLOBAL);
-        if (handle == nullptr) {
-            retained.erase(library_string);
-            continue;
-        }
-        const auto symbol_name = std::string("gr_blocklib_init_module_") + module_name_from_library(library);
-        auto* init_fn = reinterpret_cast<init_fn_t>(::dlsym(handle, symbol_name.c_str()));
-        if (init_fn == nullptr) {
-            handles.push_back(handle);
-            continue;
-        }
-        try {
-            (void)init_fn(gr::globalBlockRegistry());
-            handles.push_back(handle);
-        } catch (...) {
-            ::dlclose(handle);
-            retained.erase(library_string);
-            throw;
-        }
-    }
-#else
-    (void)staged_libraries;
-#endif
-}
-
-CandidateLibraries collect_candidate_libraries(const std::vector<std::filesystem::path>& plugin_directories) {
-    CandidateLibraries candidates;
-    for (const auto& directory : plugin_directories) {
-        if (!std::filesystem::is_directory(directory)) {
-            continue;
-        }
-        for (const auto& entry : std::filesystem::directory_iterator(directory)) {
-            if (!entry.is_regular_file() || !is_likely_gr4_library(entry.path())) {
-                continue;
-            }
-            candidates.likely_libraries.push_back(std::filesystem::absolute(entry.path()));
-        }
-    }
-
-    std::sort(candidates.likely_libraries.begin(), candidates.likely_libraries.end());
-    candidates.likely_libraries.erase(std::unique(candidates.likely_libraries.begin(), candidates.likely_libraries.end()),
-                                      candidates.likely_libraries.end());
-    if (candidates.likely_libraries.empty()) {
-        throw CatalogLoadError("no likely GNU Radio 4 plugin libraries were found in configured plugin directories");
-    }
-
-    candidates.plugin_staging_directory = create_stage_directory();
-    candidates.shared_staging_directory = create_stage_directory();
-    for (const auto& library : candidates.likely_libraries) {
-        if (is_plugin_library(library)) {
-            const auto staged = stage_library(library, candidates.plugin_staging_directory / library.filename());
-            candidates.staged_libraries.push_back(staged);
-            candidates.staged_plugin_libraries.push_back(staged);
-        }
-        if (is_shared_block_library(library)) {
-            const auto staged = stage_library(library, candidates.shared_staging_directory / library.filename());
-            candidates.staged_libraries.push_back(staged);
-            candidates.staged_shared_libraries.push_back(staged);
-        }
-    }
-    return candidates;
-}
-
-#endif  // !defined(__EMSCRIPTEN__)
 
 std::string to_title_case(std::string value) {
     bool capitalize = true;
@@ -871,14 +585,12 @@ std::vector<domain::BlockParameterDescriptor> to_parameters(gr::BlockModel& bloc
     return descriptors;
 }
 
-domain::BlockDescriptor reflect_block(const std::string& id) {
-    gr::property_map init_params;
-    std::shared_ptr<gr::BlockModel> block = instantiate_from_retained_loaders(id, init_params);
-    if (!block) {
-        if (auto created = gr::globalBlockRegistry().create(id, std::move(init_params))) {
-            block = std::shared_ptr<gr::BlockModel>(created.release());
-        }
+domain::BlockDescriptor reflect_block(gr::PluginLoader& loader, const std::string& id) {
+    auto instantiated = loader.instantiateOrError(id);
+    if (!instantiated.has_value()) {
+        throw CatalogLoadError("failed to instantiate GNU Radio 4 block for catalog: " + id + " (" + instantiated.error().message + ")");
     }
+    std::shared_ptr<gr::BlockModel> block = std::move(*instantiated);
     if (!block) {
         throw CatalogLoadError("failed to instantiate GNU Radio 4 block for catalog: " + id);
     }
@@ -1111,7 +823,7 @@ void write_all(int fd, std::string_view data) {
     }
 }
 
-domain::BlockDescriptor reflect_block_in_subprocess(const std::string& id) {
+domain::BlockDescriptor reflect_block_in_subprocess(gr::PluginLoader& loader, const std::string& id) {
     std::array<int, 2> pipe_fds{-1, -1};
     if (::pipe(pipe_fds.data()) != 0) {
         throw CatalogLoadError("failed to create GNU Radio 4 reflection pipe for block: " + id);
@@ -1127,7 +839,7 @@ domain::BlockDescriptor reflect_block_in_subprocess(const std::string& id) {
     if (pid == 0) {
         ::close(pipe_fds[0]);
         try {
-            const auto payload = to_json(reflect_block(id)).dump();
+            const auto payload = to_json(reflect_block(loader, id)).dump();
             write_all(pipe_fds[1], payload);
             ::close(pipe_fds[1]);
             _exit(0);
@@ -1179,26 +891,17 @@ domain::BlockDescriptor reflect_block_in_subprocess(const std::string& id) {
     }
 }
 
-template <typename Loader>
-void throw_on_failed_plugins(const Loader& loader) {
-    if constexpr (requires { loader.failedPlugins(); }) {
-        if (!loader.failedPlugins().empty()) {
-            const auto& [path, error] = *loader.failedPlugins().begin();
-            throw CatalogLoadError("failed to load GNU Radio 4 plugin library (" + path + ": " + error + ")");
-        }
+void throw_on_failed_plugins(const gr::PluginLoader& loader) {
+    if (const auto failures = runtime::load_failures(loader); !failures.empty()) {
+        const auto& [path, error] = failures.front();
+        throw CatalogLoadError("failed to load GNU Radio 4 plugin library (" + path + ": " + error + ")");
     }
 }
 
 #endif  // !defined(__EMSCRIPTEN__)
 
-std::vector<std::string> sorted_unique(std::vector<std::string> values) {
-    std::sort(values.begin(), values.end());
-    values.erase(std::unique(values.begin(), values.end()), values.end());
-    return values;
-}
-
 std::vector<domain::BlockDescriptor> reflect_all(const std::vector<std::string>& ids,
-                                                 domain::BlockDescriptor (*reflect)(const std::string&)) {
+                                                 const std::function<domain::BlockDescriptor(const std::string&)>& reflect) {
     std::vector<domain::BlockDescriptor> descriptors;
     descriptors.reserve(ids.size());
     for (const auto& id : ids) {
@@ -1278,44 +981,20 @@ std::string derive_category_from_metadata(const gr::property_map& meta, std::str
 
 }  // namespace detail
 
-Gr4BlockCatalogProvider::Gr4BlockCatalogProvider(std::vector<std::filesystem::path> plugin_directories)
-    : plugin_directories_(plugin_directories.empty() ? default_plugin_directories() : std::move(plugin_directories)) {}
+Gr4BlockCatalogProvider::Gr4BlockCatalogProvider(std::shared_ptr<gr::PluginLoader> loader) : loader_(std::move(loader)) {}
 
 std::vector<domain::BlockDescriptor> Gr4BlockCatalogProvider::list() const {
-#if defined(__EMSCRIPTEN__)
-    const auto blocks = sorted_unique(gr::globalBlockRegistry().keys());
-    if (blocks.empty()) {
-        throw CatalogLoadError("GNU Radio 4 block registry is empty; no blocks were linked into the WASM module");
-    }
-    return reflect_all(blocks, &reflect_block);
-#else
-    if (plugin_directories_.empty()) {
-        throw CatalogLoadError("GNU Radio 4 plugin directories are not configured");
-    }
-
-    prepend_library_search_path(plugin_directories_);
-    preload_support_libraries(plugin_directories_);
-    const auto candidate_libraries = collect_candidate_libraries(plugin_directories_);
-    bootstrap_blocklib_symbols(candidate_libraries.staged_shared_libraries);
-
-    std::vector<std::string> plugin_loader_directories;
-    if (!candidate_libraries.staged_plugin_libraries.empty()) {
-        plugin_loader_directories.push_back(candidate_libraries.plugin_staging_directory.string());
-    }
-    auto plugin_loader = std::make_unique<gr::PluginLoader>(gr::globalBlockRegistry(), gr::globalSchedulerRegistry(),
-                                                            plugin_loader_directories);
-    throw_on_failed_plugins(*plugin_loader);
-    retain_loader(std::move(plugin_loader));
-
-    auto blocks = gr::globalBlockRegistry().keys();
-    const auto retained_blocks = available_blocks_from_retained_loaders();
-    blocks.insert(blocks.end(), retained_blocks.begin(), retained_blocks.end());
-    blocks = sorted_unique(std::move(blocks));
+#if !defined(__EMSCRIPTEN__)
+    throw_on_failed_plugins(*loader_);
+#endif
+    const auto blocks = loader_->availableBlocks();
     if (blocks.empty()) {
         throw CatalogLoadError("GNU Radio 4 plugin loader found no registered blocks");
     }
-
-    return reflect_all(blocks, &reflect_block_in_subprocess);
+#if defined(__EMSCRIPTEN__)
+    return reflect_all(blocks, [this](const std::string& id) { return reflect_block(*loader_, id); });
+#else
+    return reflect_all(blocks, [this](const std::string& id) { return reflect_block_in_subprocess(*loader_, id); });
 #endif
 }
 

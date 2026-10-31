@@ -166,6 +166,10 @@ Json session_to_json(const domain::Session& session,
         body["scheduler_id"] = *session.scheduler_alias;
     }
 
+    if (session.completion_reason.has_value()) {
+        body["completion_reason"] = domain::to_string(*session.completion_reason);
+    }
+
     if (stream_plan.has_value()) {
         body["streams"] = stream_plan_to_json(*stream_plan);
     }
@@ -324,8 +328,6 @@ WasmResponse current_error_response() {
         return error_response(409, "invalid_state", error.what());
     } catch (const app::RuntimeError& error) {
         return error_response(500, "runtime_error", error.what());
-    } catch (const app::TimeoutError& error) {
-        return error_response(504, "timeout", error.what());
     } catch (const catalog::SchedulerCatalogLoadError& error) {
         return error_response(500, "scheduler_catalog_error", error.what());
     } catch (const catalog::CatalogLoadError& error) {

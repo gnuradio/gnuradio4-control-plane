@@ -7,6 +7,7 @@
 #include "gr4cp/catalog/gr4_block_catalog_provider.hpp"
 #include "gr4cp/catalog/gr4_scheduler_catalog_provider.hpp"
 #include "gr4cp/runtime/gr4_runtime_manager.hpp"
+#include "gr4cp/runtime/plugin_loader.hpp"
 #include "gr4cp/storage/in_memory_session_repository.hpp"
 
 #include <cstdio>
@@ -14,6 +15,8 @@
 #include <exception>
 #include <fstream>
 #include <iostream>
+#include <memory>
+#include <ostream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -69,11 +72,43 @@ void write_port_file(const char* path, int port) {
     }
 }
 
+void print_usage(std::ostream& output) {
+    output << "Usage: gr4cp_server [--help]\n"
+              "\n"
+              "Serves the GNU Radio 4 control plane's REST API over HTTP.\n"
+              "\n"
+              "Environment:\n"
+              "  GR4CP_PORT                    port to listen on, 8080 by default; 0 selects a free\n"
+              "                                loopback port\n"
+              "  GR4CP_PORT_FILE               file that receives the port GR4CP_PORT=0 selected\n"
+              "  GNURADIO4_PLUGIN_DIRECTORIES  colon-separated plugin directories, searched first\n"
+              "  GR4CP_STREAM_STDIO            1 for line-buffered standard output\n"
+              "  GR4CP_STREAM_DEBUG            nonzero to log stream routing to standard error\n"
+              "  GR4CP_PROXY_DEBUG             nonzero to log each proxied request to standard error\n";
+#if defined(GR4CP_HAVE_GNURADIO4)
+    output << "\nPlugin directories, in search order:\n";
+    for (const auto& directory : gr4cp::runtime::plugin_directories()) {
+        output << "  " << directory << '\n';
+    }
+#endif
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
     configure_managed_stdio();
     std::set_terminate(report_terminate);
+
+    for (int index = 1; index < argc; ++index) {
+        const std::string_view argument(argv[index]);
+        if (argument == "--help" || argument == "-h") {
+            print_usage(std::cout);
+            return 0;
+        }
+        std::cerr << "gr4cp_server: unknown argument: " << argument << '\n';
+        print_usage(std::cerr);
+        return 2;
+    }
 
     try {
 #if !defined(GR4CP_HAVE_GNURADIO4)
@@ -81,14 +116,22 @@ int main() {
                      "and a working gnuradio4 installation.\n";
         return 1;
 #else
+        std::shared_ptr<gr::PluginLoader> loader;
+        try {
+            loader = gr4cp::runtime::load_plugins();
+        } catch (const gr4cp::runtime::PluginLoadError& error) {
+            std::cerr << "gr4cp_server: " << error.what() << '\n';
+            return 1;
+        }
+
         gr4cp::storage::InMemorySessionRepository repository;
-        gr4cp::runtime::Gr4RuntimeManager runtime_manager;
+        gr4cp::runtime::Gr4RuntimeManager runtime_manager(loader);
         gr4cp::app::SessionService session_service(repository, runtime_manager);
         gr4cp::app::SessionStreamService session_stream_service;
-        gr4cp::app::BlockSettingsService block_settings_service(repository, runtime_manager);
-        gr4cp::catalog::Gr4BlockCatalogProvider block_catalog_provider;
+        gr4cp::app::BlockSettingsService block_settings_service(session_service, runtime_manager);
+        gr4cp::catalog::Gr4BlockCatalogProvider block_catalog_provider(loader);
         gr4cp::app::BlockCatalogService block_catalog_service(block_catalog_provider);
-        gr4cp::catalog::Gr4SchedulerCatalogProvider scheduler_catalog_provider;
+        gr4cp::catalog::Gr4SchedulerCatalogProvider scheduler_catalog_provider(loader);
         gr4cp::app::SchedulerCatalogService scheduler_catalog_service(scheduler_catalog_provider);
 
         gr4cp::api::HttpServer server(session_service,
