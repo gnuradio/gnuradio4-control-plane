@@ -4,12 +4,15 @@
 #include <chrono>
 #include <atomic>
 #include <condition_variable>
+#include <cstddef>
+#include <fstream>
 #include <iomanip>
 #include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <sstream>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -22,6 +25,10 @@
 #include <gtest/gtest.h>
 #include <httplib.h>
 #include <nlohmann/json.hpp>
+
+#ifdef __linux__
+#include <pthread.h>
+#endif
 
 #include "gr4cp/app/block_catalog_service.hpp"
 #include "gr4cp/app/block_settings_service.hpp"
@@ -53,6 +60,41 @@ bool block_is_registered(std::string_view block_id) {
     const auto available = gr::globalPluginLoader().availableBlocks();
     return std::ranges::any_of(available, [block_id](const auto& name) { return name == block_id; });
 }
+
+#ifdef __linux__
+// The process's virtual size in bytes, from the VmSize line of /proc/self/status.
+std::optional<std::size_t> process_virtual_size() {
+    std::ifstream status("/proc/self/status");
+    std::string line;
+    while (std::getline(status, line)) {
+        if (line.starts_with("VmSize:")) {
+            std::istringstream fields(line.substr(7));
+            std::size_t kilobytes{};
+            if (fields >> kilobytes) {
+                return kilobytes * 1024U;
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+// The stack size of a thread started with default attributes, as the server starts its connection threads.
+std::optional<std::size_t> default_thread_stack_size() {
+    std::optional<std::size_t> size;
+    std::thread([&size]() {
+        pthread_attr_t attributes;
+        if (pthread_getattr_np(pthread_self(), &attributes) != 0) {
+            return;
+        }
+        std::size_t stack_size{};
+        if (pthread_attr_getstacksize(&attributes, &stack_size) == 0) {
+            size = stack_size;
+        }
+        pthread_attr_destroy(&attributes);
+    }).join();
+    return size;
+}
+#endif
 
 class TestBlockCatalogProvider final : public gr4cp::catalog::BlockCatalogProvider {
 public:
@@ -971,6 +1013,45 @@ TEST_F(RealRuntimeHttpApiTest, CompatibilityStudioSinkStopRemovesBrowserRoute) {
     const auto after_stop = client->Get(("/sessions/" + id + "/streams/series0/http").c_str());
     ASSERT_TRUE(after_stop);
     EXPECT_EQ(after_stop->status, 409);
+}
+
+TEST_F(HttpApiTest, SequentialRequestsDoNotKeepFinishedConnectionThreads) {
+#ifndef __linux__
+    GTEST_SKIP() << "reads the virtual size from /proc/self/status";
+#else
+    // Each request opens its own connection, and the server serves each connection on its own thread. A thread
+    // that ends without being joined keeps its stack mapped, and the virtual size grows by one stack per request.
+    // Threads that serve their first request also grow it, as the allocator gives them arenas. The warm-up
+    // requests, four for each worker of the internal HTTP server, come before the measure.
+    const std::size_t warmup_requests = 4U * static_cast<std::size_t>(CPPHTTPLIB_THREAD_POOL_COUNT);
+    constexpr std::size_t kMeasuredRequests = 128U;
+    const auto stack_size = default_thread_stack_size();
+    ASSERT_TRUE(stack_size.has_value());
+
+    const auto send_requests = [this](const std::size_t count) {
+        for (std::size_t index = 0U; index < count; ++index) {
+            const auto response = client->Get("/healthz");
+            if (!response || response->status != 200) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    ASSERT_TRUE(send_requests(warmup_requests));
+    const auto before = process_virtual_size();
+    ASSERT_TRUE(before.has_value());
+    ASSERT_TRUE(send_requests(kMeasuredRequests));
+    const auto after = process_virtual_size();
+    ASSERT_TRUE(after.has_value());
+
+    // A server that keeps its ended threads grows by one stack per request. Arenas and the stack cache stay well below
+    // a quarter of that.
+    const auto growth = *after > *before ? *after - *before : std::size_t{0U};
+    EXPECT_LT(growth, kMeasuredRequests / 4U * *stack_size)
+        << "the virtual size grew by " << growth << " bytes over " << kMeasuredRequests << " requests, with a thread stack of "
+        << *stack_size << " bytes";
+#endif
 }
 
 TEST_F(HttpApiTest, GetBlocksSuccess) {

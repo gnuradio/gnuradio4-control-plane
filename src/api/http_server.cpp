@@ -5,6 +5,8 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <iostream>
+#include <iterator>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -841,6 +843,8 @@ struct gr4cp::api::HttpServer::Impl {
         stopping_.store(false);
 
         while (!stopping_.load()) {
+            join_finished_connection_threads();
+
             beast::error_code error;
             tcp::socket socket(asio::make_strand(io_context_));
             acceptor_->accept(socket, error);
@@ -856,7 +860,8 @@ struct gr4cp::api::HttpServer::Impl {
             }
 
             std::lock_guard lock(connection_mutex_);
-            connection_threads_.emplace_back([this, socket = std::move(socket)]() mutable {
+            auto& connection = connection_threads_.emplace_back();
+            connection.thread = std::jthread([this, &finished = connection.finished, socket = std::move(socket)]() mutable {
                 try {
                     handle_connection(std::move(socket));
                 } catch (const std::exception& exception) {
@@ -864,6 +869,7 @@ struct gr4cp::api::HttpServer::Impl {
                 } catch (...) {
                     std::cerr << "gr4cp_server: unknown exception in HTTP connection worker\n";
                 }
+                finished.store(true, std::memory_order_release);
             });
         }
 
@@ -954,12 +960,28 @@ private:
     }
 
     void join_connection_threads() {
-        std::vector<std::jthread> threads;
+        std::list<ConnectionThread> threads;
         {
             std::lock_guard lock(connection_mutex_);
             threads.swap(connection_threads_);
         }
         threads.clear();
+    }
+
+    // Joins the threads whose connections have ended. A thread that is not joined keeps its stack.
+    void join_finished_connection_threads() {
+        std::list<ConnectionThread> finished;
+        {
+            std::lock_guard lock(connection_mutex_);
+            for (auto it = connection_threads_.begin(); it != connection_threads_.end();) {
+                const auto next = std::next(it);
+                if (it->finished.load(std::memory_order_acquire)) {
+                    finished.splice(finished.end(), connection_threads_, it);
+                }
+                it = next;
+            }
+        }
+        finished.clear();
     }
 
     void handle_connection(tcp::socket socket) {
@@ -1090,6 +1112,12 @@ private:
         }
     }
 
+    // The thread that serves one accepted connection. The thread sets finished as its last step.
+    struct ConnectionThread {
+        std::atomic<bool> finished{false};
+        std::jthread thread;
+    };
+
     asio::io_context io_context_{1};
     std::unique_ptr<tcp::acceptor> acceptor_;
     std::atomic<bool> stopping_{true};
@@ -1097,7 +1125,7 @@ private:
     std::optional<asio::executor_work_guard<asio::io_context::executor_type>> websocket_work_guard_;
     std::jthread websocket_io_thread_;
     std::mutex connection_mutex_;
-    std::vector<std::jthread> connection_threads_;
+    std::list<ConnectionThread> connection_threads_;
     std::mutex bridge_mutex_;
     std::set<std::shared_ptr<WebSocketBridge>> active_bridges_;
     std::mutex cleanup_mutex_;
