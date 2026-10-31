@@ -19,6 +19,8 @@
 #include <utility>
 #include <vector>
 
+#include <sys/socket.h>
+
 #include <boost/asio.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
@@ -859,6 +861,8 @@ struct gr4cp::api::HttpServer::Impl {
             acceptor_->close(error);
         }
 
+        shut_down_reading_sockets();
+
         std::vector<std::shared_ptr<WebSocketBridge>> bridges;
         {
             std::lock_guard lock(bridge_mutex_);
@@ -953,11 +957,27 @@ private:
         finished.clear();
     }
 
+    // Shuts down the sockets of the connections that are still reading their request. Their reads return at once.
+    void shut_down_reading_sockets() {
+        std::lock_guard lock(reading_mutex_);
+        for (const auto handle : reading_sockets_) {
+            ::shutdown(handle, SHUT_RDWR);
+        }
+    }
+
     void handle_connection(tcp::socket socket) {
         beast::flat_buffer buffer;
         http::request<http::string_body> request;
         beast::error_code error;
-        http::read(socket, buffer, request, error);
+        {
+            const ReadingRequest reading(*this, socket);
+            // stop() sets stopping_ before it shuts down the listed sockets. A socket listed after that pass
+            // returns here unread.
+            if (stopping_.load()) {
+                return;
+            }
+            http::read(socket, buffer, request, error);
+        }
         if (error) {
             return;
         }
@@ -1087,6 +1107,28 @@ private:
         std::jthread thread;
     };
 
+    // Lists a connection's socket in reading_sockets_ while the connection reads its request. The caller keeps the
+    // socket open for the object's lifetime. stop() then never shuts down a descriptor that another open has reused.
+    class ReadingRequest {
+    public:
+        ReadingRequest(Impl& impl, tcp::socket& socket) : impl_(impl), handle_(socket.native_handle()) {
+            std::lock_guard lock(impl_.reading_mutex_);
+            impl_.reading_sockets_.insert(handle_);
+        }
+
+        ~ReadingRequest() {
+            std::lock_guard lock(impl_.reading_mutex_);
+            impl_.reading_sockets_.erase(handle_);
+        }
+
+        ReadingRequest(const ReadingRequest&) = delete;
+        ReadingRequest& operator=(const ReadingRequest&) = delete;
+
+    private:
+        Impl& impl_;
+        tcp::socket::native_handle_type handle_;
+    };
+
     asio::io_context io_context_{1};
     std::unique_ptr<tcp::acceptor> acceptor_;
     std::atomic<bool> stopping_{true};
@@ -1095,6 +1137,8 @@ private:
     std::jthread websocket_io_thread_;
     std::mutex connection_mutex_;
     std::list<ConnectionThread> connection_threads_;
+    std::mutex reading_mutex_;
+    std::set<tcp::socket::native_handle_type> reading_sockets_;
     std::mutex bridge_mutex_;
     std::set<std::shared_ptr<WebSocketBridge>> active_bridges_;
     std::mutex cleanup_mutex_;
