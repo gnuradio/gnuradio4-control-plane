@@ -1,5 +1,7 @@
 #include "gr4cp/api/http_server.hpp"
 
+#include "session_json.hpp"
+
 #include <atomic>
 #include <cctype>
 #include <condition_variable>
@@ -16,8 +18,6 @@
 #include <vector>
 
 #include <boost/asio.hpp>
-#include <boost/uuid/random_generator.hpp>
-#include <boost/uuid/uuid_io.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/beast/version.hpp>
@@ -35,31 +35,6 @@ namespace beast = boost::beast;
 namespace http = beast::http;
 namespace websocket = beast::websocket;
 using tcp = asio::ip::tcp;
-
-// One identity for this server process, independent of session/execution IDs.
-const std::string& server_instance_id() {
-    static const std::string identity = boost::uuids::to_string(boost::uuids::random_generator{}());
-    return identity;
-}
-
-Json stream_to_json(const domain::BrowserStreamDescriptor& stream) {
-    return Json{
-        {"id", stream.id},
-        {"block_instance_name", stream.block_instance_name},
-        {"transport", stream.transport},
-        {"payload_format", stream.payload_format},
-        {"path", stream.path},
-        {"ready", stream.ready},
-    };
-}
-
-Json stream_plan_to_json(const domain::StreamRuntimePlan& plan) {
-    auto body = Json::array();
-    for (const auto& stream_plan : plan.streams) {
-        body.push_back(stream_to_json(domain::to_browser_stream_descriptor(stream_plan)));
-    }
-    return body;
-}
 
 Json block_parameter_default_to_json(const domain::BlockParameterDefault& value) {
     return std::visit([](const auto& item) -> Json { return item; }, value);
@@ -174,38 +149,6 @@ Json schedulers_to_json(const std::vector<domain::SchedulerDescriptor>& schedule
     auto body = Json::array();
     for (const auto& scheduler : schedulers) {
         body.push_back(scheduler_to_json(scheduler));
-    }
-    return body;
-}
-
-Json session_to_json(const domain::Session& session, const std::optional<domain::StreamRuntimePlan>& stream_plan = std::nullopt) {
-    auto body = Json{
-        {"id", session.id},
-        {"server_instance_id", server_instance_id()},
-        {"name", session.name},
-        {"state", domain::to_string(session.state)},
-        {"created_at", domain::format_timestamp_utc(session.created_at)},
-        {"updated_at", domain::format_timestamp_utc(session.updated_at)},
-        {"last_error", session.last_error ? Json(*session.last_error) : Json(nullptr)},
-    };
-
-    if (session.scheduler_alias.has_value()) {
-        body["scheduler_id"] = *session.scheduler_alias;
-    }
-
-    if (stream_plan.has_value()) {
-        body["streams"] = stream_plan_to_json(*stream_plan);
-    }
-
-    return body;
-}
-
-Json sessions_to_json(const std::vector<domain::Session>& sessions,
-                      const std::vector<std::optional<domain::StreamRuntimePlan>>& stream_plans) {
-    auto body = Json::array();
-    for (std::size_t index = 0; index < sessions.size(); ++index) {
-        const auto& plan = index < stream_plans.size() ? stream_plans[index] : std::optional<domain::StreamRuntimePlan>{};
-        body.push_back(session_to_json(sessions[index], plan));
     }
     return body;
 }

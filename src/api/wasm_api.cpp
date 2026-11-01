@@ -1,5 +1,7 @@
 #include "gr4cp/api/wasm_api.hpp"
 
+#include "session_json.hpp"
+
 #include <optional>
 #include <regex>
 #include <string>
@@ -14,25 +16,6 @@ namespace gr4cp::api {
 namespace {
 
 using Json = nlohmann::json;
-
-Json stream_to_json(const domain::BrowserStreamDescriptor& stream) {
-    return Json{
-        {"id", stream.id},
-        {"block_instance_name", stream.block_instance_name},
-        {"transport", stream.transport},
-        {"payload_format", stream.payload_format},
-        {"path", stream.path},
-        {"ready", stream.ready},
-    };
-}
-
-Json stream_plan_to_json(const domain::StreamRuntimePlan& plan) {
-    auto body = Json::array();
-    for (const auto& stream_plan : plan.streams) {
-        body.push_back(stream_to_json(domain::to_browser_stream_descriptor(stream_plan)));
-    }
-    return body;
-}
 
 Json block_parameter_default_to_json(const domain::BlockParameterDefault& value) {
     return std::visit([](const auto& item) -> Json { return item; }, value);
@@ -147,38 +130,6 @@ Json schedulers_to_json(const std::vector<domain::SchedulerDescriptor>& schedule
     auto body = Json::array();
     for (const auto& scheduler : schedulers) {
         body.push_back(scheduler_to_json(scheduler));
-    }
-    return body;
-}
-
-Json session_to_json(const domain::Session& session,
-                     const std::optional<domain::StreamRuntimePlan>& stream_plan = std::nullopt) {
-    auto body = Json{
-        {"id", session.id},
-        {"name", session.name},
-        {"state", domain::to_string(session.state)},
-        {"created_at", domain::format_timestamp_utc(session.created_at)},
-        {"updated_at", domain::format_timestamp_utc(session.updated_at)},
-        {"last_error", session.last_error ? Json(*session.last_error) : Json(nullptr)},
-    };
-
-    if (session.scheduler_alias.has_value()) {
-        body["scheduler_id"] = *session.scheduler_alias;
-    }
-
-    if (stream_plan.has_value()) {
-        body["streams"] = stream_plan_to_json(*stream_plan);
-    }
-
-    return body;
-}
-
-Json sessions_to_json(const std::vector<domain::Session>& sessions,
-                      const std::vector<std::optional<domain::StreamRuntimePlan>>& stream_plans) {
-    auto body = Json::array();
-    for (std::size_t index = 0; index < sessions.size(); ++index) {
-        const auto& plan = index < stream_plans.size() ? stream_plans[index] : std::optional<domain::StreamRuntimePlan>{};
-        body.push_back(session_to_json(sessions[index], plan));
     }
     return body;
 }
@@ -411,7 +362,7 @@ WasmResponse WasmApi::dispatch(const std::string& method, const std::string& tar
 
         if (method == "GET") {
             if (path == "/healthz") {
-                return json_response(Json{{"ok", true}});
+                return json_response(Json{{"ok", true}, {"server_instance_id", server_instance_id()}});
             }
             if (path == "/blocks") {
                 return json_response(blocks_to_json(block_catalog_service_.list()));

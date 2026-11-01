@@ -156,6 +156,7 @@ else()
 endif()
 
 add_library(gr4cp_core
+    src/api/session_json.cpp
     src/app/block_settings_service.cpp
     src/app/block_catalog_service.cpp
     src/app/scheduler_catalog_service.cpp
@@ -425,6 +426,20 @@ if(NOT EMSCRIPTEN)
     else()
         gtest_discover_tests(gr4cp_http_test)
     endif()
+
+    # Exercise the in-process dispatcher on native builds without an Emscripten SDK.
+    add_executable(gr4cp_wasm_api_test
+        test/wasm_api_test.cpp
+        src/api/wasm_api.cpp
+    )
+
+    target_link_libraries(gr4cp_wasm_api_test
+        PRIVATE
+            gr4cp_core
+            GTest::gtest_main
+            Threads::Threads
+    )
+    gtest_discover_tests(gr4cp_wasm_api_test)
 
     add_executable(gr4cp_cli_test
         test/cli_test.cpp
