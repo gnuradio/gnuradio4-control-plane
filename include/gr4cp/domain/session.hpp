@@ -30,6 +30,7 @@ struct Session {
     SessionState state{SessionState::Stopped};
     std::optional<std::string> last_error;
     std::optional<CompletionReason> completion_reason;  // set once a run has ended, cleared when a run starts
+    std::optional<std::string> execution_id;  // changes on each successful start, retained when the run ends
     Timestamp created_at;
     Timestamp updated_at;
 };
