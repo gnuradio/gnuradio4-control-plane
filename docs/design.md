@@ -47,6 +47,7 @@ Each session stores:
 - `grc_content`
 - `state`
 - optional `last_error`
+- optional `execution_id`: identifies the most recent successful start or restart, remains stable when that run ends, and is absent before the first successful start
 - optional `completion_reason`: how the last run ended, `completed` by itself, `stopped` by a stop, or `error`; cleared when a run starts
 - `created_at`
 - `updated_at`
@@ -161,7 +162,7 @@ Rules:
 - the target block is addressed by name, unique name or `name` setting, in that order
 - the settings calls read the session as `GET /sessions/{id}` does
 - an update needs a running session; stopped or errored sessions, and a run that is ending by itself, return conflict errors
-- a read of a session whose run has ended, by itself or by a stop, answers with the settings the run left; the runtime keeps the ended run's block handles until the session starts again or is deleted
+- a read of a session whose run has ended, by itself or by a stop, answers with the settings the run left; the runtime copies the final settings after the workers and stop hooks finish, then releases the block handles; the copy has no byte cap and lasts until the next prepare or delete. A capture failure is reported on reads of the affected block
 - a read of a session that has not run, or whose run is stopping, returns a conflict error
 - a name that more than one block carries is refused with the candidates
 - stored GRC content is not inspected to fabricate values

@@ -73,6 +73,10 @@ Json session_to_json(const domain::Session& session, const std::optional<domain:
         body["scheduler_id"] = *session.scheduler_alias;
     }
 
+    if (session.execution_id.has_value()) {
+        body["execution_id"] = *session.execution_id;
+    }
+
     if (session.completion_reason.has_value()) {
         body["completion_reason"] = domain::to_string(*session.completion_reason);
     }

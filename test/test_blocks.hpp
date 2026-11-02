@@ -265,6 +265,38 @@ private:
     static inline std::atomic<std::int64_t> count_{0};
 };
 
+// Writes its final receipts in stop(), then exposes no live block once the settings have been captured.
+struct TerminalSettingsSource : gr::Block<TerminalSettingsSource> {
+    gr::PortOut<float> out;
+    gr::Size_t n_samples = 0U;  // zero runs until explicitly stopped
+    gr::property_map finalization;
+    std::string payload;
+
+    GR_MAKE_REFLECTABLE(TerminalSettingsSource, out, n_samples, finalization, payload);
+    explicit TerminalSettingsSource(gr::property_map init = {}) : gr::Block<TerminalSettingsSource>(std::move(init)) {}
+    static std::int64_t alive() noexcept { return LiveInstances::count(); }
+
+    void stop() {
+        finalization = {{"unsigned", std::numeric_limits<std::uint64_t>::max()},
+                        {"signed", std::numeric_limits<std::int64_t>::min()}};
+        payload.assign(5 * 1024 * 1024, 'x');
+        // Publish the completed stop-hook receipt to the settings cache BlockHandle::get() reads.
+        this->settings().updateActiveParameters();
+    }
+
+    gr::work::Status processBulk(gr::OutputSpanLike auto& output) {
+        const auto n = n_samples == 0U ? output.size() : std::min<std::size_t>(output.size(), n_samples - produced_);
+        std::fill_n(output.begin(), n, 0.0F);
+        output.publish(n);
+        produced_ += static_cast<gr::Size_t>(n);
+        return n_samples != 0U && produced_ >= n_samples ? gr::work::Status::DONE : gr::work::Status::OK;
+    }
+
+private:
+    LiveInstances live_;
+    gr::Size_t produced_ = 0U;
+};
+
 // Produces zeros until the run stops, and counts its live instances.
 struct CountedSource : gr::Block<CountedSource> {
     gr::PortOut<float> out;
@@ -316,6 +348,7 @@ inline void register_test_blocks() {
                registry.insert<FailingSource>("=gr4cp::test::FailingSource") &&
                registry.insert<StreamEndpointSink>("=gr4cp::test::StreamEndpointSink") &&
                registry.insert<BoundStreamSink>("=gr4cp::test::BoundStreamSink") &&
+               registry.insert<TerminalSettingsSource>("=gr4cp::test::TerminalSettingsSource") &&
                registry.insert<CountedSource>("=gr4cp::test::CountedSource") &&
                registry.insert<HeldTeardownSource>("=gr4cp::test::HeldTeardownSource") &&
                registry.insert<VectorSettingsSource>("=gr4cp::test::VectorSettingsSource");

@@ -485,6 +485,31 @@ TEST_F(SessionServiceTest, EndedRunIsDestroyedAfterTheServiceReleasesItsLock) {
     EXPECT_TRUE(*other_read_answered);
 }
 
+TEST_F(SessionServiceTest, ExecutionIdentityChangesOnlyOnSuccessfulStartOrRestart) {
+    const auto created = service.create("identity", "graph");
+    EXPECT_FALSE(created.execution_id.has_value());
+    EXPECT_FALSE(service.stop(created.id).execution_id.has_value());
+    const auto first = service.start(created.id);
+    ASSERT_TRUE(first.execution_id.has_value());
+    EXPECT_FALSE(first.execution_id->empty());
+    EXPECT_EQ(service.get(created.id).execution_id, first.execution_id);
+    EXPECT_THROW(service.start(created.id), gr4cp::app::InvalidStateError);
+    EXPECT_EQ(service.get(created.id).execution_id, first.execution_id);
+    runtime.observation = {.ended = true, .run_error = "worker failed"};
+    EXPECT_EQ(service.get(created.id).execution_id, first.execution_id);
+    EXPECT_EQ(service.stop(created.id).execution_id, first.execution_id);
+    runtime.observation = {};
+    const auto second = service.start(created.id);
+    EXPECT_NE(second.execution_id, first.execution_id);
+    const auto third = service.restart(created.id);
+    EXPECT_NE(third.execution_id, second.execution_id);
+    EXPECT_EQ(service.list().front().execution_id, third.execution_id);
+    service.stop(created.id);
+    runtime.fail_on("start", "start exploded");
+    EXPECT_THROW(service.start(created.id), gr4cp::app::RuntimeError);
+    EXPECT_EQ(service.get(created.id).execution_id, third.execution_id);
+}
+
 TEST_F(SessionServiceTest, RuntimeFailureCausesErrorStateAndLastErrorToBeSet) {
     const auto created = service.create("demo", "graph");
     runtime.fail_on("start", "start exploded");
