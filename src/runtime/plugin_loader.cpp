@@ -41,10 +41,15 @@ void append_directories(std::vector<std::string>& directories, std::string_view 
 }
 
 #if !defined(__EMSCRIPTEN__)
-// Core's reason for a shared object that opened, has no plugin entry point and registered nothing; core gives such a
-// file no other mark. Startup passes over such a file, as a library directory holds core libraries of this kind. A
-// rewording in core makes every such file stop startup, and
-// PluginLoaderTest.StartupPassesOverACoreLibraryBesideThePlugins fails.
+// Startup passes over a shared object that opened, has no plugin entry point and registered nothing, as a library
+// directory holds core libraries of this kind. A core with PluginLoader::ordinaryLibraries() lists such a file there
+// and not among its failures.
+template <typename Loader>
+concept ListsOrdinaryLibraries = requires(const Loader& loader) { loader.ordinaryLibraries(); };
+
+// A core without ordinaryLibraries() reports such a file as a failure with this reason and no other mark. If that core
+// rewords the reason, every such file stops startup and PluginLoaderTest.StartupPassesOverACoreLibraryBesideThePlugins
+// fails.
 constexpr std::string_view kNoEntryPointReason = "Failed to load symbol gr_plugin_make";
 
 std::string joined(std::span<const std::string> directories) {
@@ -86,7 +91,7 @@ std::vector<std::pair<std::string, std::string>> load_failures([[maybe_unused]] 
 #else
     std::vector<std::pair<std::string, std::string>> failures;
     for (const auto& [file, reason] : loader.failedPlugins()) {
-        if (reason != kNoEntryPointReason) {
+        if (ListsOrdinaryLibraries<gr::PluginLoader> || reason != kNoEntryPointReason) {
             failures.emplace_back(file, reason);
         }
     }

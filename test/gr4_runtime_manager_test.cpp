@@ -52,6 +52,16 @@ gr4cp::domain::Session read_until(gr4cp::app::SessionService& service, const std
     return session;
 }
 
+// Returns the loader's ordinaryLibraries(), or std::nullopt when the loader has no such list.
+template <typename Loader>
+std::optional<std::vector<std::string>> ordinary_libraries(const Loader& loader) {
+    if constexpr (requires { loader.ordinaryLibraries(); }) {
+        return loader.ordinaryLibraries();
+    } else {
+        return std::nullopt;
+    }
+}
+
 // Reads a block's settings until `key` holds `expected`, for at most ten seconds: a staged value applies at the
 // block's next work call.
 gr::property_map read_setting_until(gr4cp::runtime::Gr4RuntimeManager& runtime,
@@ -624,8 +634,9 @@ TEST(PluginLoaderTest, StartupRefusesAMissingAnUnreadableAndAnEmptyDirectory) {
 }
 
 // A directory that holds a core library beside the plugins loads, and both catalogs list from it. The library opens,
-// has no plugin entry point and registers nothing. Block libraries register into the process-wide registries, which
-// the load uses here.
+// has no plugin entry point and registers nothing. A core with PluginLoader::ordinaryLibraries() lists it there and
+// not among the failures. A core without that list reports it as a failure. Block libraries register into the
+// process-wide registries, which the load uses here.
 TEST(PluginLoaderTest, StartupPassesOverACoreLibraryBesideThePlugins) {
     const ScopedVariable variable("GNURADIO4_PLUGIN_DIRECTORIES", std::nullopt);
     const auto plugins = gr4cp::runtime::plugin_directories();
@@ -641,6 +652,7 @@ TEST(PluginLoaderTest, StartupPassesOverACoreLibraryBesideThePlugins) {
 
     std::string refusal = "<accepted>";
     std::vector<std::string> failed;
+    std::optional<std::vector<std::string>> ordinary;
     std::size_t listed_blocks = 0U;
     std::size_t listed_schedulers = 0U;
     {
@@ -651,6 +663,7 @@ TEST(PluginLoaderTest, StartupPassesOverACoreLibraryBesideThePlugins) {
             for (const auto& failure : loader->failedPlugins()) {
                 failed.push_back(failure.first);
             }
+            ordinary = ordinary_libraries(*loader);
             listed_blocks = gr4cp::catalog::Gr4BlockCatalogProvider(loader).list().size();
             listed_schedulers = gr4cp::catalog::Gr4SchedulerCatalogProvider(loader).list().size();
         } catch (const std::exception& error) {
@@ -662,7 +675,12 @@ TEST(PluginLoaderTest, StartupPassesOverACoreLibraryBesideThePlugins) {
     EXPECT_EQ(refusal, "<accepted>");
     EXPECT_GT(listed_blocks, 0U);
     EXPECT_GT(listed_schedulers, 0U);
-    EXPECT_EQ(failed, std::vector<std::string>{core_library_file});
+    if (ordinary.has_value()) {
+        EXPECT_EQ(*ordinary, std::vector<std::string>{core_library_file});
+        EXPECT_EQ(failed, std::vector<std::string>{});
+    } else {
+        EXPECT_EQ(failed, std::vector<std::string>{core_library_file});
+    }
 }
 
 // load_plugins() refuses a directory that holds a plugin that fails. The one-line message names the directory, the
