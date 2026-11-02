@@ -741,6 +741,9 @@ struct gr4cp::api::HttpServer::Impl {
 
     ~Impl() {
         stop();
+        // The caller owns the listening thread. Keep Impl alive until its active
+        // listen_after_bind() call has finished the final cleanup.
+        std::lock_guard lock(listener_mutex_);
     }
 
     int bind_to_any_port(const std::string& host) {
@@ -808,6 +811,7 @@ struct gr4cp::api::HttpServer::Impl {
     }
 
     bool listen_after_bind() {
+        std::lock_guard listener_lock(listener_mutex_);
         ensure_internal_bound();
         start_internal_server();
         start_websocket_io();
@@ -818,7 +822,14 @@ struct gr4cp::api::HttpServer::Impl {
 
             beast::error_code error;
             tcp::socket socket(asio::make_strand(io_context_));
-            acceptor_->accept(socket, error);
+            {
+                // accept() is nonblocking. Serialize it with Stop's close().
+                std::lock_guard lock(connection_mutex_);
+                if (stopping_.load()) {
+                    break;
+                }
+                acceptor_->accept(socket, error);
+            }
             if (error) {
                 if (error == asio::error::would_block || error == asio::error::try_again) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -831,17 +842,25 @@ struct gr4cp::api::HttpServer::Impl {
             }
 
             std::lock_guard lock(connection_mutex_);
+            if (stopping_.load()) {
+                break;
+            }
             auto& connection = connection_threads_.emplace_back();
-            connection.thread = std::jthread([this, &finished = connection.finished, socket = std::move(socket)]() mutable {
-                try {
-                    handle_connection(std::move(socket));
-                } catch (const std::exception& exception) {
-                    std::cerr << "gr4cp_server: unhandled exception in HTTP connection worker: " << exception.what() << '\n';
-                } catch (...) {
-                    std::cerr << "gr4cp_server: unknown exception in HTTP connection worker\n";
-                }
-                finished.store(true, std::memory_order_release);
-            });
+            try {
+                connection.thread = std::jthread([this, &finished = connection.finished, socket = std::move(socket)]() mutable {
+                    try {
+                        handle_connection(std::move(socket));
+                    } catch (const std::exception& exception) {
+                        std::cerr << "gr4cp_server: unhandled exception in HTTP connection worker: " << exception.what() << '\n';
+                    } catch (...) {
+                        std::cerr << "gr4cp_server: unknown exception in HTTP connection worker\n";
+                    }
+                    finished.store(true, std::memory_order_release);
+                });
+            } catch (...) {
+                connection_threads_.pop_back();
+                throw;
+            }
         }
 
         cleanup_threads();
@@ -855,10 +874,13 @@ struct gr4cp::api::HttpServer::Impl {
 
         internal_server.stop();
 
-        if (acceptor_) {
-            beast::error_code error;
-            acceptor_->cancel(error);
-            acceptor_->close(error);
+        {
+            std::lock_guard lock(connection_mutex_);
+            if (acceptor_) {
+                beast::error_code error;
+                acceptor_->cancel(error);
+                acceptor_->close(error);
+            }
         }
 
         shut_down_reading_sockets();
@@ -878,6 +900,12 @@ struct gr4cp::api::HttpServer::Impl {
     app::SessionService& session_service;
     httplib::Server internal_server;
     int internal_port_{0};
+
+    std::size_t connection_worker_count() {
+        std::lock_guard cleanup_lock(cleanup_mutex_);
+        std::lock_guard lock(connection_mutex_);
+        return connection_threads_.size();
+    }
 
 private:
     void ensure_internal_bound() {
@@ -943,6 +971,9 @@ private:
 
     // Joins the threads whose connections have ended. A thread that is not joined keeps its stack.
     void join_finished_connection_threads() {
+        // Stop must wait for joins owned by the accept loop as well as those it
+        // performs itself. Workers never acquire cleanup_mutex_.
+        std::lock_guard cleanup_lock(cleanup_mutex_);
         std::list<ConnectionThread> finished;
         {
             std::lock_guard lock(connection_mutex_);
@@ -1092,6 +1123,10 @@ private:
         auto bridge = std::make_shared<WebSocketBridge>(std::move(browser), std::move(internal));
         {
             std::lock_guard lock(bridge_mutex_);
+            // Stop either snapshots this bridge or prevents its registration.
+            if (stopping_.load()) {
+                return;
+            }
             active_bridges_.insert(bridge);
         }
         bridge->run();
@@ -1142,6 +1177,7 @@ private:
     std::mutex bridge_mutex_;
     std::set<std::shared_ptr<WebSocketBridge>> active_bridges_;
     std::mutex cleanup_mutex_;
+    std::mutex listener_mutex_;
 };
 
 gr4cp::api::HttpServer::HttpServer(app::SessionService& session_service,
@@ -1167,6 +1203,10 @@ bool gr4cp::api::HttpServer::listen_after_bind() {
 
 bool gr4cp::api::HttpServer::listen(const std::string& host, const int port) {
     return impl_->listen(host, port);
+}
+
+std::size_t gr4cp::api::HttpServer::connection_worker_count() const {
+    return impl_->connection_worker_count();
 }
 
 void gr4cp::api::HttpServer::stop() {

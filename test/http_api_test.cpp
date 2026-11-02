@@ -63,6 +63,14 @@ extern "C" std::size_t __sanitizer_get_current_allocated_bytes();
 #include <malloc.h>
 #endif
 
+namespace gr4cp::api {
+struct HttpServerTestAccess {
+    static std::size_t workers(const HttpServer& server) {
+        return server.connection_worker_count();
+    }
+};
+}  // namespace gr4cp::api
+
 namespace {
 
 namespace asio = boost::asio;
@@ -880,6 +888,17 @@ protected:
         }
     }
 
+    bool wait_for_workers(std::size_t count) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        do {
+            if (gr4cp::api::HttpServerTestAccess::workers(*server) == count) {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        } while (std::chrono::steady_clock::now() < deadline);
+        return false;
+    }
+
     static nlohmann::json parse_json(const httplib::Result& response) {
         EXPECT_TRUE(response);
         return nlohmann::json::parse(response->body);
@@ -1126,6 +1145,96 @@ protected:
     std::jthread server_thread;
     std::unique_ptr<httplib::Client> client;
 };
+
+TEST_F(HttpApiTest, CompletedWorkersAreReapedWithoutAnotherRequest) {
+    for (int i = 0; i < 500; ++i) {
+        const auto response = client->Get("/healthz");
+        ASSERT_TRUE(response);
+        ASSERT_EQ(response->status, 200);
+    }
+    EXPECT_TRUE(wait_for_workers(0));
+}
+
+TEST_F(HttpApiTest, SlowHttpWorkerSurvivesReapingAndStopWaitsForCompletion) {
+    asio::io_context context;
+    tcp::socket slow(context);
+    slow.connect({asio::ip::make_address("127.0.0.1"), static_cast<unsigned short>(port)});
+    asio::write(slow, asio::buffer(std::string("GET /healthz HTTP/1.1\r\n")));
+    for (int i = 0; i < 30; ++i) ASSERT_TRUE(client->Get("/healthz"));
+    EXPECT_TRUE(wait_for_workers(1));
+    auto stopped = std::async(std::launch::async, [this] { server->stop(); });
+    EXPECT_EQ(stopped.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+    slow.close();
+    EXPECT_EQ(stopped.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    stopped.get();
+    EXPECT_EQ(gr4cp::api::HttpServerTestAccess::workers(*server), 0U);
+}
+
+TEST_F(HttpApiTest, DestructionWaitsForActiveWorkerAndListener) {
+    asio::io_context context;
+    tcp::socket slow(context);
+    slow.connect({asio::ip::make_address("127.0.0.1"), static_cast<unsigned short>(port)});
+    asio::write(slow, asio::buffer(std::string("GET /healthz HTTP/1.1\r\n")));
+    // Fence acceptance: exclude the fixture's completed readiness worker.
+    ASSERT_TRUE(client->Get("/healthz"));
+    EXPECT_TRUE(wait_for_workers(1));
+    // Move ownership only after listen_after_bind() is running.
+    auto destroy = std::async(std::launch::async, [owned = std::move(server)]() mutable { owned.reset(); });
+    EXPECT_EQ(destroy.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+    slow.close();
+    EXPECT_EQ(destroy.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    destroy.get();
+    server_thread.join();
+}
+
+TEST_F(HttpApiTest, StopDuringConnectionChurnJoinsEveryRegisteredWorker) {
+    std::atomic<bool> finish{false};
+    std::atomic<int> responses{0};
+    std::vector<std::jthread> callers;
+    for (int i = 0; i < 8; ++i) {
+        callers.emplace_back([&] {
+            httplib::Client local("127.0.0.1", port);
+            local.set_connection_timeout(0, 200000);
+            local.set_read_timeout(0, 200000);
+            while (!finish.load()) {
+                if (auto response = local.Get("/healthz"); response && response->status == 200) ++responses;
+            }
+        });
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (responses.load() < 16 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    EXPECT_GE(responses.load(), 16);
+    server->stop();
+    finish.store(true);
+    callers.clear();
+    server_thread.join();
+    EXPECT_EQ(gr4cp::api::HttpServerTestAccess::workers(*server), 0U);
+}
+
+TEST_F(HttpApiTest, DestructionClosesActiveWebsocketAndWaitsForListener) {
+    const auto id = create_session_with_graph(authored_websocket_graph())["id"].get<std::string>();
+    ASSERT_TRUE(post_with_fresh_client("/sessions/" + id + "/start"));
+    auto stream = connect_websocket("/sessions/" + id + "/streams/series0/ws");
+    ASSERT_TRUE(runtime_manager.wait_for_websocket_connection(id, "series0"));
+    runtime_manager.send_websocket_text(id, "series0", "before destruction");
+    EXPECT_EQ(read_websocket_text(stream), "before destruction");
+    EXPECT_TRUE(wait_for_workers(1));
+    server.reset();
+    server_thread.join();
+    EXPECT_TRUE(wait_for_websocket_close(stream));
+}
+
+TEST_F(HttpApiTest, RepeatedServerLifetimesReclaimCompletedWorkers) {
+    for (int cycle = 0; cycle < 5; ++cycle) {
+        for (int i = 0; i < 20; ++i) ASSERT_TRUE(client->Get("/healthz"));
+        EXPECT_TRUE(wait_for_workers(0));
+        TearDown();
+        server.reset();
+        SetUp();
+    }
+}
 
 TEST_F(HttpApiTest, PostSessionsSuccess) {
     const auto response = client->Post("/sessions", R"({"name":"demo","grc":"flowgraph"})", "application/json");

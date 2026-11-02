@@ -37,6 +37,8 @@ public:
     void stop();
 
 private:
+    friend struct HttpServerTestAccess;
+    std::size_t connection_worker_count() const;
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
