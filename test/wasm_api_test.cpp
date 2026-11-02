@@ -78,6 +78,7 @@ TEST_F(WasmApiTest, HealthAndEverySessionResponseShareHttpIdentityAndSerializati
     ASSERT_EQ(created.status, 201);
     auto session = Json::parse(created.body);
     EXPECT_FALSE(session.contains("completion_reason"));
+    EXPECT_FALSE(session.contains("execution_id"));
     const auto id = session.at("id").get<std::string>();
     const auto path = "/sessions/" + id;
     EXPECT_EQ(session.at("server_instance_id"), health.at("server_instance_id"));
@@ -96,6 +97,7 @@ TEST_F(WasmApiTest, HealthAndEverySessionResponseShareHttpIdentityAndSerializati
     };
     expect_matching_session();
 
+    std::string previous_execution;
     for (const auto* action : {"start", "stop", "restart"}) {
         const auto response = api.dispatch("POST", path + "/" + action, "");
         ASSERT_EQ(response.status, 200) << response.body;
@@ -103,9 +105,15 @@ TEST_F(WasmApiTest, HealthAndEverySessionResponseShareHttpIdentityAndSerializati
         EXPECT_EQ(session.at("server_instance_id"), health.at("server_instance_id"));
         const bool stopped = std::string_view(action) == "stop";
         EXPECT_EQ(session.contains("completion_reason"), stopped);
+        const auto execution_id = session.at("execution_id").get<std::string>();
+        EXPECT_FALSE(execution_id.empty());
         if (stopped) {
             EXPECT_EQ(session.at("completion_reason"), "stopped");
+            EXPECT_EQ(execution_id, previous_execution);
+        } else {
+            EXPECT_NE(execution_id, previous_execution);
         }
+        previous_execution = execution_id;
         expect_matching_session();
     }
 }

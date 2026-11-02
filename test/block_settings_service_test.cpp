@@ -211,6 +211,24 @@ TEST_F(BlockSettingsServiceTest, GetReturnsTensorsAsArraysAndComplexAsParts) {
     EXPECT_EQ(result["correction"], nlohmann::json::parse(R"({"real": 0.5, "imag": 0.25})"));
 }
 
+// #34's receipt must remain visible beside values that the current serializer supports in full.
+TEST_F(BlockSettingsServiceTest, LiveGetKeepsReceiptsBesideTensorAndComplexSettings) {
+    const auto session = create_session(gr4cp::domain::SessionState::Running);
+    runtime.settings[session.id]["radio0"] = gr::property_map{
+        {"frequency", gr::Tensor<double>(std::pmr::vector<double>{100e6})},
+        {"correction", std::complex<double>(1.0, -0.5)},
+        {"source_status", gr::property_map{{"epoch_completion", gr::property_map{
+            {"completed", true}, {"quiescent", true}, {"accepted_samples", std::uint64_t{31}}}}}},
+    };
+    const auto result = service.get(session.id, "radio0");
+    EXPECT_EQ(result["frequency"], nlohmann::json::array({100e6}));
+    EXPECT_EQ(result["correction"], nlohmann::json({{"real", 1.0}, {"imag", -0.5}}));
+    EXPECT_TRUE(result["source_status"]["epoch_completion"]["completed"]);
+    EXPECT_TRUE(result["source_status"]["epoch_completion"]["quiescent"]);
+    EXPECT_EQ(result["source_status"]["epoch_completion"]["accepted_samples"], "31");
+    EXPECT_FALSE(result.contains("__gr4cp_unavailable_fields"));
+}
+
 TEST_F(BlockSettingsServiceTest, UpdateFailsWhenSessionNotRunning) {
     const auto session = create_session(gr4cp::domain::SessionState::Stopped);
 

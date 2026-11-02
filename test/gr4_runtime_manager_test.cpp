@@ -859,9 +859,55 @@ connections:
     service.remove(created.id);
 }
 
-// The blocks of an ended run go when the session is deleted, and the service holds no lock meanwhile: while a block's
-// destructor waits, a list of the sessions answers.
-TEST_F(Gr4RuntimeManagerTest, BlockTeardownOnDeleteHoldsUpNoOtherRequest) {
+// Final values outlive the graph, including stop-hook writes and values larger than the old capture cap.
+TEST_F(Gr4RuntimeManagerTest, FinalSettingsSurviveBlockDestructionWithoutTruncation) {
+    gr4cp::test::register_test_blocks();
+    gr4cp::storage::InMemorySessionRepository repository;
+    gr4cp::app::SessionService service(repository, runtime_);
+    for (const bool finite : {false, true}) {
+        const auto baseline = gr4cp::test::TerminalSettingsSource::alive();
+        const auto created = service.create("terminal", std::format(R"(blocks:
+  - id: "gr4cp::test::TerminalSettingsSource"
+    unique_name: "terminal_unique"
+    parameters:
+      name: "terminal_alias"
+      n_samples: {}
+  - id: "gr::blocks::basic::NullSink<float32>"
+    parameters:
+      name: "sink0"
+connections:
+  - ["terminal_unique", 0, "sink0", 0]
+)", finite ? 64 : 0));
+        const auto started = service.start(created.id);
+        ASSERT_TRUE(started.execution_id.has_value());
+        const auto ended = finite ? read_until(service, created.id, [](const auto& session) {
+            return session.state != gr4cp::domain::SessionState::Running;
+        }) : service.stop(created.id);
+        ASSERT_EQ(ended.state, gr4cp::domain::SessionState::Stopped);
+        EXPECT_EQ(ended.execution_id, started.execution_id);
+        EXPECT_EQ(gr4cp::test::TerminalSettingsSource::alive(), baseline);
+
+        const auto settings = runtime_.get_block_settings(ended, "terminal_alias");
+        const auto* finalization = settings.at("finalization").get_if<gr::property_map>();
+        ASSERT_NE(finalization, nullptr);
+        EXPECT_EQ(finalization->at("unsigned").value_or(std::uint64_t{}), UINT64_MAX);
+        EXPECT_EQ(finalization->at("signed").value_or(std::int64_t{}), INT64_MIN);
+        const auto payload = settings.at("payload").value_or(std::string{});
+        EXPECT_EQ(payload.size(), 5U * 1024U * 1024U);
+        EXPECT_TRUE(std::ranges::all_of(payload, [](char value) { return value == 'x'; }));
+        const auto unique_name = settings.at("unique_name").value_or(std::string{});
+        ASSERT_FALSE(unique_name.empty());
+        EXPECT_EQ(runtime_.get_block_settings(ended, unique_name), settings);
+        EXPECT_THROW((void)runtime_.get_block_settings(ended, "missing"), gr4cp::runtime::BlockNotFoundError);
+        EXPECT_EQ(service.stop(created.id).execution_id, started.execution_id);
+        EXPECT_EQ(runtime_.get_block_settings(ended, "terminal_alias"), settings);
+        service.remove(created.id);
+        EXPECT_THROW((void)runtime_.get_block_settings(ended, "terminal_alias"), gr4cp::runtime::SessionNotRunningError);
+    }
+}
+
+// Reconciliation copies final values under the service lock, but destroys blocks after releasing that lock.
+TEST_F(Gr4RuntimeManagerTest, BlockTeardownOnCompletionHoldsUpNoOtherRequest) {
     gr4cp::test::register_test_blocks();
     gr4cp::storage::InMemorySessionRepository repository;
     gr4cp::app::SessionService service(repository, runtime_);
@@ -877,22 +923,21 @@ connections:
   - ["held0", 0, "sink0", 0]
 )");
     service.start(created.id);
-    ASSERT_EQ(read_until(service, created.id, [](const auto& read) {
-                  return read.state != gr4cp::domain::SessionState::Running;
-              }).state,
-              gr4cp::domain::SessionState::Stopped);
-
     gr4cp::test::TeardownHold::arm();
-    auto removal = std::async(std::launch::async, [&service, &created] { service.remove(created.id); });
-    ASSERT_TRUE(gr4cp::test::TeardownHold::wait_until_entered(10s));
+    auto completion = std::async(std::launch::async, [&service, &created] {
+        return read_until(service, created.id, [](const auto& session) {
+            return session.state != gr4cp::domain::SessionState::Running;
+        });
+    });
+    const bool entered = gr4cp::test::TeardownHold::wait_until_entered(10s);
     const auto listed = service.list();
     const bool answered_while_held = gr4cp::test::TeardownHold::holding();
     gr4cp::test::TeardownHold::release();
-    removal.get();
-
+    EXPECT_EQ(completion.get().state, gr4cp::domain::SessionState::Stopped);
+    EXPECT_TRUE(entered);
     EXPECT_TRUE(answered_while_held);
     EXPECT_EQ(listed.size(), 2U);
-    EXPECT_EQ(service.list().size(), 1U);
+    service.remove(created.id);
 }
 
 TEST_F(Gr4RuntimeManagerTest, NameTwoBlocksCarryIsRefusedWithTheCandidates) {
@@ -942,6 +987,9 @@ connections:
     }
 
     runtime_.stop(session);
+    EXPECT_THROW((void)runtime_.get_block_settings(session, "twin"), gr4cp::runtime::BlockNotFoundError);
+    EXPECT_NO_THROW((void)runtime_.get_block_settings(session, "sink_a"));
+    EXPECT_NO_THROW((void)runtime_.get_block_settings(session, "sink_b"));
     runtime_.destroy(session);
 }
 
