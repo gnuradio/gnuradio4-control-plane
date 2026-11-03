@@ -28,12 +28,18 @@ The service is not a multi-tenant platform, graph editor, diagnostics system, pl
 - CMake 3.25 or newer
 - C++23 compiler
 - GNU Radio 4 installation with CMake package files
-- Boost headers
+- Boost headers (Asio, Beast)
 - nlohmann-json
 - cpp-httplib
 - GTest
-- Zlib
-- pkg-config
+
+Every dependency is located with `find_package` in config mode, so each one must provide a CMake package config. This
+repository does not fetch or build any of them. Some distribution packages of cpp-httplib ship only a pkg-config file and
+no CMake package config, and are not enough on their own.
+
+The [gr-deps superbuild](https://github.com/johnwparent/gnuradio4-superbuild) builds the third-party dependencies into a
+single prefix with `-DTARGET_GR_CONTROL_PLANE=ON`. Emscripten builds need only nlohmann-json
+(`-DTARGET_GR_CORE=OFF -DENABLE_NLOHMANN_JSON=ON`).
 
 The production block catalog is GNU Radio 4-backed only. With the default `GR4CP_ENABLE_GR4_CATALOG=ON`, configuration requires a working `gnuradio4` package. Server startup also validates GNU Radio 4 plugin loading and catalog reflection before accepting requests. If initialization fails, the server exits instead of serving placeholder catalog data.
 
@@ -45,18 +51,15 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-If GNU Radio 4 is installed in a non-standard prefix:
+If GNU Radio 4 or the dependencies are installed in non-standard prefixes, list them in `CMAKE_PREFIX_PATH`:
 
 ```bash
-cmake -S . -B build -DGR4CP_GNURADIO4_PREFIX=/path/to/gr4/prefix
+cmake -S . -B build -DCMAKE_PREFIX_PATH="/path/to/gr4/prefix;/path/to/gr-deps/prefix"
 ```
-
-`GR4CP_GNURADIO4_PREFIX` can also be provided as an environment variable.
 
 Useful build options:
 
 - `GR4CP_ENABLE_GR4_CATALOG=ON`: require the GNU Radio 4-backed catalog provider, enabled by default
-- `GR4CP_SUPPRESS_IMPORTED_WERROR=ON`: strip inherited `-Werror` from imported GNU Radio 4 targets when needed
 - `GR4CP_EXTRA_PLUGIN_DIRECTORIES=<dir>[:<dir>...]`: plugin directories searched in addition to the ones under the gnuradio4 prefix
 - `GR4CP_PLUGIN_DIRECTORIES=<dir>[:<dir>...]`: plugin directories that replace the ones derived from the gnuradio4 prefix
 - `USE_CCACHE=ON`: use ccache when available, enabled by default
