@@ -37,7 +37,7 @@ Every dependency is located with `find_package` in config mode, so each one must
 repository does not fetch or build any of them. Some distribution packages of cpp-httplib ship only a pkg-config file and
 no CMake package config, and are not enough on their own.
 
-The [gr-deps superbuild](https://github.com/johnwparent/gnuradio4-superbuild) builds the third-party dependencies into a
+The [gr-deps superbuild](https://github.com/gnuradio/gnuradio4-deps) builds the third-party dependencies into a
 single prefix with `-DTARGET_GR_CONTROL_PLANE=ON`. Emscripten builds need only nlohmann-json
 (`-DTARGET_GR_CORE=OFF -DENABLE_NLOHMANN_JSON=ON`).
 
