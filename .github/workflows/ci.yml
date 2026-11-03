@@ -103,7 +103,7 @@ jobs:
       - name: Build control-plane dependencies
         id: deps
         if: matrix.cmake_wrapper == null
-        uses: johnwparent/gnuradio4-superbuild@f23ee97613a606c8f70cdd6a40a8ade47e7ce9ad
+        uses: gnuradio/gnuradio4-deps@fa668fc3955e7b5647827027b714aa73ab1f7d2d
         with:
           target-gr-core: OFF
           enable-httplib: ON
@@ -114,7 +114,7 @@ jobs:
       - name: Build control-plane dependencies (Emscripten)
         id: deps-emscripten
         if: matrix.cmake_wrapper == 'emcmake'
-        uses: johnwparent/gnuradio4-superbuild@f23ee97613a606c8f70cdd6a40a8ade47e7ce9ad
+        uses: gnuradio/gnuradio4-deps@fa668fc3955e7b5647827027b714aa73ab1f7d2d
         with:
           target-gr-core: OFF
           enable-httplib: OFF
