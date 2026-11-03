@@ -1155,7 +1155,7 @@ TEST_F(HttpApiTest, CompletedWorkersAreReapedWithoutAnotherRequest) {
     EXPECT_TRUE(wait_for_workers(0));
 }
 
-TEST_F(HttpApiTest, SlowHttpWorkerSurvivesReapingAndStopWaitsForCompletion) {
+TEST_F(HttpApiTest, SlowHttpWorkerSurvivesReapingAndStopCancelsReadWithinDeadline) {
     asio::io_context context;
     tcp::socket slow(context);
     slow.connect({asio::ip::make_address("127.0.0.1"), static_cast<unsigned short>(port)});
@@ -1163,14 +1163,14 @@ TEST_F(HttpApiTest, SlowHttpWorkerSurvivesReapingAndStopWaitsForCompletion) {
     for (int i = 0; i < 30; ++i) ASSERT_TRUE(client->Get("/healthz"));
     EXPECT_TRUE(wait_for_workers(1));
     auto stopped = std::async(std::launch::async, [this] { server->stop(); });
-    EXPECT_EQ(stopped.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+    EXPECT_EQ(stopped.wait_for(std::chrono::seconds(3)), std::future_status::ready);
     slow.close();
     EXPECT_EQ(stopped.wait_for(std::chrono::seconds(3)), std::future_status::ready);
     stopped.get();
     EXPECT_EQ(gr4cp::api::HttpServerTestAccess::workers(*server), 0U);
 }
 
-TEST_F(HttpApiTest, DestructionWaitsForActiveWorkerAndListener) {
+TEST_F(HttpApiTest, DestructionCancelsActiveReadAndJoinsListenerWithinDeadline) {
     asio::io_context context;
     tcp::socket slow(context);
     slow.connect({asio::ip::make_address("127.0.0.1"), static_cast<unsigned short>(port)});
@@ -1180,7 +1180,7 @@ TEST_F(HttpApiTest, DestructionWaitsForActiveWorkerAndListener) {
     EXPECT_TRUE(wait_for_workers(1));
     // Move ownership only after listen_after_bind() is running.
     auto destroy = std::async(std::launch::async, [owned = std::move(server)]() mutable { owned.reset(); });
-    EXPECT_EQ(destroy.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+    EXPECT_EQ(destroy.wait_for(std::chrono::seconds(3)), std::future_status::ready);
     slow.close();
     EXPECT_EQ(destroy.wait_for(std::chrono::seconds(3)), std::future_status::ready);
     destroy.get();
