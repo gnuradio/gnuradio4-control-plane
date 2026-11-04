@@ -28,6 +28,7 @@
 #include <future>
 #include <limits>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -37,6 +38,15 @@
 #include <vector>
 
 namespace {
+
+// A library path the plugin-loader cases take from ctest. The failure for an unset variable names it.
+std::string required_path(const char* name) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || *value == '\0') {
+        throw std::runtime_error(std::string(name) + " is not set; run the test through ctest");
+    }
+    return value;
+}
 
 using namespace std::chrono_literals;
 
@@ -646,7 +656,7 @@ TEST(PluginLoaderTest, StartupPassesOverACoreLibraryBesideThePlugins) {
     for (const auto& entry : std::filesystem::directory_iterator(plugins.front())) {
         std::filesystem::create_symlink(entry.path(), directory / entry.path().filename());
     }
-    const std::filesystem::path core_library(GR4CP_CORE_LIBRARY);
+    const std::filesystem::path core_library(required_path("GR4CP_CORE_LIBRARY"));
     std::filesystem::create_symlink(core_library, directory / core_library.filename());
     const auto core_library_file = (directory / core_library.filename()).string();
 
@@ -689,7 +699,7 @@ TEST(PluginLoaderTest, StartupRefusalNamesTheDirectoryAndThePluginThatFailed) {
     const auto directory = std::filesystem::temp_directory_path() / std::format("gr4cp-broken-plugin-{}", ::getpid());
     std::filesystem::create_directories(directory);
     const auto plugin = (directory / "libbroken-plugin.so").string();
-    std::filesystem::copy_file(GR4CP_BROKEN_PLUGIN_LIBRARY, plugin);
+    std::filesystem::copy_file(required_path("GR4CP_BROKEN_PLUGIN_LIBRARY"), plugin);
 
     std::string refusal = "<accepted>";
     std::string reason;

@@ -371,14 +371,13 @@ if(NOT EMSCRIPTEN)
             Threads::Threads
     )
 
-    target_compile_definitions(gr4cp_smoke_test
-        PRIVATE
-            GR4CP_SERVER_EXECUTABLE="$<TARGET_FILE:gr4cp_server>"
-    )
     add_dependencies(gr4cp_smoke_test gr4cp_server)
 
     include(GoogleTest)
-    gtest_discover_tests(gr4cp_smoke_test)
+    gtest_discover_tests(gr4cp_smoke_test
+        PROPERTIES
+            ENVIRONMENT "GR4CP_SERVER_EXECUTABLE=$<TARGET_FILE:gr4cp_server>"
+    )
 
     add_library(gr4cp_broken_plugin MODULE
         test/broken_plugin.cpp
@@ -403,13 +402,15 @@ if(NOT EMSCRIPTEN)
 
     target_compile_definitions(gr4cp_core_test
         PRIVATE
-            GR4CP_BROKEN_PLUGIN_LIBRARY="$<TARGET_FILE:gr4cp_broken_plugin>"
-            GR4CP_CORE_LIBRARY="$<TARGET_FILE:gnuradio4::gnuradio-shared-state>"
             GR4CP_PLUGIN_DIRECTORIES="${GR4CP_PLUGIN_DIRECTORIES}"
     )
     add_dependencies(gr4cp_core_test gr4cp_broken_plugin)
 
-    gtest_discover_tests(gr4cp_core_test)
+    gtest_discover_tests(gr4cp_core_test
+        PROPERTIES
+            ENVIRONMENT_MODIFICATION "GR4CP_BROKEN_PLUGIN_LIBRARY=set:$<TARGET_FILE:gr4cp_broken_plugin>"
+            ENVIRONMENT_MODIFICATION "GR4CP_CORE_LIBRARY=set:$<TARGET_FILE:gnuradio4::gnuradio-shared-state>"
+    )
 
     add_executable(gr4cp_http_test
         test/http_api_test.cpp
@@ -451,12 +452,10 @@ if(NOT EMSCRIPTEN)
             Threads::Threads
     )
 
-    target_compile_definitions(gr4cp_cli_test
-        PRIVATE
-            GR4CP_CLI_EXECUTABLE="$<TARGET_FILE:gr4cp_cli_exec>"
+    gtest_discover_tests(gr4cp_cli_test
+        PROPERTIES
+            ENVIRONMENT "GR4CP_CLI_EXECUTABLE=$<TARGET_FILE:gr4cp_cli_exec>"
     )
-
-    gtest_discover_tests(gr4cp_cli_test)
 
 endif()
 endif()
