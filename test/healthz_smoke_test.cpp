@@ -5,6 +5,8 @@
 #include <array>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -25,9 +27,19 @@
 
 namespace {
 
+// The path of the server executable, from the variable ctest sets for these tests. An unset variable fails the test with
+// its name.
+std::string required_path(const char* name) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || *value == '\0') {
+        throw std::runtime_error(std::string(name) + " is not set; run the test through ctest");
+    }
+    return value;
+}
+
 // Runs the server executable with `arguments` and returns its exit status and standard output.
 std::pair<int, std::string> run_server(const std::string& arguments) {
-    const std::string command = std::string(GR4CP_SERVER_EXECUTABLE) + " " + arguments + " 2>/dev/null";
+    const std::string command = required_path("GR4CP_SERVER_EXECUTABLE") + " " + arguments + " 2>/dev/null";
     FILE* pipe = popen(command.c_str(), "r");
     if (pipe == nullptr) {
         return {-1, "failed to launch the server"};

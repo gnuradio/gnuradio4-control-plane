@@ -1,8 +1,10 @@
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <sys/wait.h>
 #include <thread>
@@ -23,9 +25,14 @@
 
 namespace {
 
-#ifndef GR4CP_CLI_EXECUTABLE
-#define GR4CP_CLI_EXECUTABLE "./gr4cp-cli"
-#endif
+// The path of the CLI executable, from the variable ctest sets. A run without it stops on the variable's name.
+std::string required_path(const char* name) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || *value == '\0') {
+        throw std::runtime_error(std::string(name) + " is not set; run the test through ctest");
+    }
+    return value;
+}
 
 class EmptyBlockCatalogProvider final : public gr4cp::catalog::BlockCatalogProvider {
 public:
@@ -97,7 +104,7 @@ protected:
     }
 
     std::pair<int, std::string> run_cli(const std::string& arguments) {
-        const std::string command = std::string(GR4CP_CLI_EXECUTABLE) + " " + arguments + " 2>&1";
+        const std::string command = required_path("GR4CP_CLI_EXECUTABLE") + " " + arguments + " 2>&1";
         FILE* pipe = popen(command.c_str(), "r");
         if (pipe == nullptr) {
             return {1, "failed to launch CLI"};
