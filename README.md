@@ -281,6 +281,11 @@ curl http://127.0.0.1:8080/blocks/blocks.math.add_ff
 
 Catalog responses describe block IDs, names, categories, summaries, ports, and parameters. The catalog is independent of running sessions and is not runtime graph inspection.
 
+A block that fails while it is reflected is left out of the catalog rather than failing it. On Linux and macOS each
+block is reflected in a forked worker process, so that holds even for a block that crashes. Windows has no `fork()` and
+the WASM build has no processes, so there blocks are reflected in the server itself: a block that throws is still left
+out, but one that crashes stops the server.
+
 ## CLI
 
 `gr4cp-cli` is a thin client for the session lifecycle API. It talks to a running server and defaults to `http://127.0.0.1:8080`.
