@@ -135,6 +135,14 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     )
 endif()
 
+if(WIN32)
+    # the stream binding allocator calls Winsock itself rather than through cpp-httplib
+    target_link_libraries(gr4cp_core
+        PRIVATE
+            ws2_32
+    )
+endif()
+
 if(NOT EMSCRIPTEN)
     add_library(gr4cp_cli
         src/cli/cli.cpp
