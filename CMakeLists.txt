@@ -10,6 +10,7 @@ include(GNUInstallDirs)
 
 option(USE_CCACHE "Use ccache if available" ON)
 option(ENABLE_TESTING "Build control-plane tests" ON)
+option(GR_PACKAGING "Allow the GNU Radio 4 control plane to be packaged with CPack" OFF)
 
 option(GR4CP_ENABLE_GR4_CATALOG "Enable the required GNU Radio 4-backed block catalog provider" ON)
 
@@ -224,23 +225,6 @@ if(NOT EMSCRIPTEN)
 
     set_target_properties(gr4cp_cli_exec PROPERTIES OUTPUT_NAME gr4cp-cli)
 
-    if(APPLE)
-        set(_gr4cp_executable_install_rpath "@loader_path/../${CMAKE_INSTALL_LIBDIR}")
-        set(_gr4cp_library_install_rpath "@loader_path")
-    elseif(UNIX)
-        set(_gr4cp_executable_install_rpath "\$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
-        set(_gr4cp_library_install_rpath "\$ORIGIN")
-    endif()
-
-    if(DEFINED _gr4cp_executable_install_rpath)
-        set_target_properties(gr4cp_server gr4cp_cli_exec PROPERTIES
-            INSTALL_RPATH "${_gr4cp_executable_install_rpath}"
-        )
-        set_target_properties(gr4cp_core gr4cp_cli PROPERTIES
-            INSTALL_RPATH "${_gr4cp_library_install_rpath}"
-        )
-    endif()
-
     target_link_libraries(gr4cp_cli_exec
         PRIVATE
             gr4cp_cli
@@ -356,15 +340,96 @@ if(NOT EMSCRIPTEN)
 endif()
 endif()
 
-if(NOT EMSCRIPTEN)
-    install(TARGETS gr4cp_core gr4cp_cli gr4cp_server gr4cp_cli_exec
-        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+if(COMMAND gr_install_artifact)
+    # gr_install_artifact() comes with gnuradio4's package config. It puts everything in the one layout all GR 4
+    # projects share (on Windows the executables beside the GR 4 DLLs in bin/, elsewhere with an RPATH into lib/) and
+    # in the CORE and DEVELOP components the GR 4 installers select from.
+    if(NOT EMSCRIPTEN)
+        set(_gr4cp_runtime_dependency_args)
+        if(GR_PACKAGING)
+            # With GR_PACKAGING, gr_install_artifact() hands install() a RUNTIME_DEPENDENCIES set, and these are
+            # appended to its exclusions; they belong in GrInstall.cmake. GR 4's own libraries ship in their own
+            # packages, which install into the same root, so bundling them would have two installers own one file.
+            # The names are matched before resolution, and on macOS they are install names such as
+            # "@rpath/libgnuradio-plugin.dylib". GrInstall.cmake's system-path patterns are matched before resolution
+            # too, against names that are never paths, so system libraries are excluded here once they are resolved.
+            set(_gr4cp_runtime_dependency_args
+                PRE_EXCLUDE_REGEXES
+                    "(^|/)(lib)?gnuradio-"
+                POST_EXCLUDE_REGEXES
+                    "^/lib"
+                    "^/usr/lib"
+                    "^/usr/local/lib"
+                    "^/System/Library"
+                    "^/opt/homebrew"
+                    "^/usr/local/opt"
+            )
+        endif()
+        gr_install_artifact(TARGETS gr4cp_server gr4cp_cli_exec COMPONENT CORE ${_gr4cp_runtime_dependency_args})
+
+        # Static by default, so only their archives install, to DEVELOP. With BUILD_SHARED_LIBS the server and CLI
+        # load them, so the libraries themselves belong in CORE and carry the same runtime dependencies.
+        get_target_property(_gr4cp_core_type gr4cp_core TYPE)
+        if(_gr4cp_core_type STREQUAL "SHARED_LIBRARY")
+            set(_gr4cp_library_dependency_args ${_gr4cp_runtime_dependency_args})
+        else()
+            set(_gr4cp_library_dependency_args)
+        endif()
+        gr_install_artifact(TARGETS gr4cp_core gr4cp_cli
+            COMPONENT CORE ARCHIVE_COMPONENT DEVELOP ${_gr4cp_library_dependency_args})
+    endif()
+
+    gr_install_artifact(DIRECTORY include/gr4cp/
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/gr4cp
+        COMPONENT DEVELOP
+        FILES_MATCHING PATTERN "*.hpp"
+    )
+else()
+    # without gnuradio4, or with one that predates its install helpers, there is no shared layout to follow
+    if(NOT EMSCRIPTEN)
+        if(APPLE)
+            set(_gr4cp_executable_install_rpath "@loader_path/../${CMAKE_INSTALL_LIBDIR}")
+            set(_gr4cp_library_install_rpath "@loader_path")
+        elseif(UNIX)
+            set(_gr4cp_executable_install_rpath "\$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
+            set(_gr4cp_library_install_rpath "\$ORIGIN")
+        endif()
+
+        if(DEFINED _gr4cp_executable_install_rpath)
+            set_target_properties(gr4cp_server gr4cp_cli_exec PROPERTIES
+                INSTALL_RPATH "${_gr4cp_executable_install_rpath}"
+            )
+            set_target_properties(gr4cp_core gr4cp_cli PROPERTIES
+                INSTALL_RPATH "${_gr4cp_library_install_rpath}"
+            )
+        endif()
+
+        install(TARGETS gr4cp_core gr4cp_cli gr4cp_server gr4cp_cli_exec
+            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+            LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        )
+    endif()
+
+    install(DIRECTORY include/gr4cp/
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/gr4cp
+        FILES_MATCHING PATTERN "*.hpp"
     )
 endif()
 
-install(DIRECTORY include/gr4cp/
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/gr4cp
-    FILES_MATCHING PATTERN "*.hpp"
-)
+if(GR_PACKAGING)
+    # the installer helper cmake/CPackConfig.cmake calls on this platform, if it has one
+    if(WIN32)
+        set(_gr4cp_installer_helper gr_configure_innosetup_installer)
+    elseif(APPLE)
+        set(_gr4cp_installer_helper gr_configure_productbuild_installer)
+    else()
+        set(_gr4cp_installer_helper gr_install_artifact)
+    endif()
+    if(EMSCRIPTEN OR NOT COMMAND gr_install_artifact OR NOT COMMAND ${_gr4cp_installer_helper})
+        message(FATAL_ERROR "GR_PACKAGING needs a native build against a gnuradio4 that provides its install and "
+                            "installer helpers (GrInstall.cmake, and GrInnoSetup.cmake or GrProductBuild.cmake): "
+                            "the GR 4 installers are configured through them")
+    endif()
+    include(cmake/CPackConfig.cmake)
+endif()

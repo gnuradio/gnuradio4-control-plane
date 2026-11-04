@@ -59,6 +59,7 @@ cmake -S . -B build -DCMAKE_PREFIX_PATH="/path/to/gr4/prefix;/path/to/gr-deps/pr
 
 Useful build options:
 
+- `GR_PACKAGING=OFF`: configure CPack installers, see [Packaging](#packaging)
 - `GR4CP_ENABLE_GR4_CATALOG=ON`: require the GNU Radio 4-backed catalog provider, enabled by default
 - `GR4CP_EXTRA_PLUGIN_DIRECTORIES=<dir>[:<dir>...]`: plugin directories searched in addition to the installation's plugin directory
 - `GR4CP_PLUGIN_DIRECTORIES=<dir>[:<dir>...]`: plugin directories that replace the installation's plugin directory
@@ -75,9 +76,30 @@ Install the runtime with:
 cmake --install build --prefix /path/to/prefix
 ```
 
-The install includes `libgr4cp_core` and `libgr4cp_cli`. The installed server
-and CLI use relative runtime paths to find those libraries under the same
-prefix, so they do not depend on the build tree.
+The install includes the static `gr4cp_core` and `gr4cp_cli` libraries and their headers. When the gnuradio4 package
+provides its install helpers (`gr_install_artifact()`), the server and CLI are installed in the layout every GNU Radio 4
+project shares, in the `CORE` and `DEVELOP` components its installers select from; install them into the gnuradio4
+prefix so they find its libraries.
+
+### Packaging
+
+With `-DGR_PACKAGING=ON`, `cpack` builds the same kind of installer the other GNU Radio 4 projects ship: Inno Setup
+on Windows, productbuild packages on macOS and a Debian package elsewhere. The installers are configured through the
+helpers in gnuradio4's package config, so they need a gnuradio4 that provides them. The Windows and macOS installers
+install into the shared GNU Radio 4 layout, on Windows the root recorded in the shared install manifest. The Debian
+package installs under `CPACK_PACKAGING_INSTALL_PREFIX`, which has to be the gnuradio4 prefix, and depends on
+`gnuradio4-core`. GNU Radio 4's own libraries are left to their own packages; only third-party libraries the
+executables load are bundled.
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DGR_PACKAGING=ON -DCMAKE_PREFIX_PATH="/path/to/gr4;/path/to/gr-deps"
+cmake --build build
+cd build && cpack
+```
+
+The server finds block libraries through `GNURADIO4_PLUGIN_DIRECTORIES` and then the installation's plugin directory,
+`gr::installedPluginDirectory()`, which gnuradio4 records when it is built. An installation placed under another root
+therefore needs `GNURADIO4_PLUGIN_DIRECTORIES` set.
 
 ## Run The Server
 
