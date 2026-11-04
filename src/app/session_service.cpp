@@ -18,12 +18,12 @@ gr4cp::domain::Timestamp now_utc() {
     return std::chrono::system_clock::now();
 }
 
-std::string generate_session_id() {
+std::string generate_id(std::string_view prefix) {
     thread_local std::mt19937_64 generator(std::random_device{}());
     std::uniform_int_distribution<unsigned long long> distribution;
 
     std::ostringstream out;
-    out << "sess_" << std::hex << std::setw(16) << std::setfill('0') << distribution(generator);
+    out << prefix << std::hex << std::setw(16) << std::setfill('0') << distribution(generator);
     return out.str();
 }
 
@@ -80,7 +80,7 @@ domain::Session SessionService::create(const std::string& name,
     session.state = domain::SessionState::Stopped;
 
     do {
-        session.id = generate_session_id();
+        session.id = generate_id("sess_");
     } while (repository_.get(session.id).has_value());
 
     session.created_at = now_utc();
@@ -150,6 +150,7 @@ domain::Session SessionService::start(const std::string& id) {
         session.state = domain::SessionState::Running;
         session.last_error.reset();
         session.completion_reason.reset();
+        session.execution_id = generate_id("exec_");
         session.updated_at = now_utc();
         store_session_locked(session, InternalLifecyclePhase::Running);
         return session;
@@ -243,6 +244,7 @@ domain::Session SessionService::restart(const std::string& id) {
         session.state = domain::SessionState::Running;
         session.last_error.reset();
         session.completion_reason.reset();
+        session.execution_id = generate_id("exec_");
         session.updated_at = now_utc();
         store_session_locked(session, InternalLifecyclePhase::Running);
         return session;

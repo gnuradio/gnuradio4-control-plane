@@ -3140,24 +3140,31 @@ TEST_F(HttpApiTest, StopSessionSuccess) {
 TEST_F(HttpApiTest, CompletionReasonAppearsOnceARunHasEnded) {
     const auto created = parse_json(client->Post("/sessions", R"({"name":"demo","grc":"flowgraph"})", "application/json"));
     const auto id = created["id"].get<std::string>();
+    EXPECT_FALSE(created.contains("execution_id"));
     EXPECT_FALSE(created.contains("completion_reason")) << created.dump();
 
     const auto started = client->Post(("/sessions/" + id + "/start").c_str(), "", "application/json");
     ASSERT_TRUE(started);
+    const auto execution_id = parse_json(started).at("execution_id").get<std::string>();
+    EXPECT_FALSE(execution_id.empty());
     EXPECT_FALSE(parse_json(started).contains("completion_reason")) << started->body;
 
     const auto stopped = client->Post(("/sessions/" + id + "/stop").c_str(), "", "application/json");
     ASSERT_TRUE(stopped);
+    EXPECT_EQ(parse_json(stopped)["execution_id"], execution_id);
     EXPECT_EQ(parse_json(stopped)["completion_reason"], "stopped") << stopped->body;
     const auto read = client->Get(("/sessions/" + id).c_str());
     ASSERT_TRUE(read);
+    EXPECT_EQ(parse_json(read)["execution_id"], execution_id);
     EXPECT_EQ(parse_json(read)["completion_reason"], "stopped") << read->body;
     const auto listed = client->Get("/sessions");
     ASSERT_TRUE(listed);
+    EXPECT_EQ(parse_json(listed)[0]["execution_id"], execution_id);
     EXPECT_EQ(parse_json(listed)[0]["completion_reason"], "stopped") << listed->body;
 
     const auto restarted = client->Post(("/sessions/" + id + "/start").c_str(), "", "application/json");
     ASSERT_TRUE(restarted);
+    EXPECT_NE(parse_json(restarted)["execution_id"], execution_id);
     EXPECT_FALSE(parse_json(restarted).contains("completion_reason")) << restarted->body;
 }
 

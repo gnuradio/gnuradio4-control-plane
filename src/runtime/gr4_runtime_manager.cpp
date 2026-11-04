@@ -91,12 +91,37 @@ std::optional<std::string> value_as_string(const gr::pmt::Value& value) {
     return result;
 }
 
-std::optional<std::string> settings_name(const gr::BlockHandle& block) {
+// An ended block's values and lookup identity, without a handle keeping the block alive.
+struct CapturedBlock {
+    std::string unique_name;
+    std::string block_name;
+    std::string type_name;
+    gr::property_map settings;
+    std::optional<std::string> capture_error;
+
+    std::string_view uniqueName() const { return unique_name; }
+    std::string_view name() const { return block_name; }
+    std::string_view typeName() const { return type_name; }
+    std::optional<gr::pmt::Value> get(const std::string& key) const {
+        const auto it = settings.find(key);
+        return it == settings.end() ? std::nullopt : std::optional<gr::pmt::Value>(it->second);
+    }
+    gr::property_map get() const {
+        if (capture_error.has_value()) {
+            throw std::runtime_error(*capture_error);
+        }
+        return settings;
+    }
+};
+
+template <typename Block>
+std::optional<std::string> settings_name(const Block& block) {
     const auto value = block.get(std::string("name"));
     return value.has_value() ? value_as_string(*value) : std::nullopt;
 }
 
-std::string describe_runtime_block(const gr::BlockHandle& block) {
+template <typename Block>
+std::string describe_runtime_block(const Block& block) {
     std::string description(block.uniqueName());
 
     if (const auto name = std::string(block.name()); !name.empty() && name != description) {
@@ -115,7 +140,8 @@ std::string describe_runtime_block(const gr::BlockHandle& block) {
     return description;
 }
 
-BlockNotFoundError make_block_not_found_error(const std::map<std::string, gr::BlockHandle, std::less<>>& blocks,
+template <typename Block>
+BlockNotFoundError make_block_not_found_error(const std::map<std::string, Block, std::less<>>& blocks,
                                               std::string_view block_unique_name) {
     std::string available;
     for (const auto& [_, block] : blocks) {
@@ -129,10 +155,11 @@ BlockNotFoundError make_block_not_found_error(const std::map<std::string, gr::Bl
 // Returns the block `requested_block_target` names: the block with that name, else the one with that unique name, else
 // the one with that `name` setting, or null. Throws BlockNotFoundError with the candidates when two blocks carry the
 // name or the `name` setting.
-gr::BlockHandle* resolve_runtime_block(std::map<std::string, gr::BlockHandle, std::less<>>& blocks,
+template <typename Block>
+Block* resolve_runtime_block(std::map<std::string, Block, std::less<>>& blocks,
                                        std::string_view requested_block_target) {
-    const auto only_match = [&blocks, requested_block_target](auto carries) -> gr::BlockHandle* {
-        std::vector<gr::BlockHandle*> matches;
+    const auto only_match = [&blocks, requested_block_target](auto carries) -> Block* {
+        std::vector<Block*> matches;
         for (auto& [_, block] : blocks) {
             if (carries(block)) {
                 matches.push_back(&block);
@@ -150,7 +177,7 @@ gr::BlockHandle* resolve_runtime_block(std::map<std::string, gr::BlockHandle, st
         return matches.empty() ? nullptr : matches.front();
     };
 
-    if (auto* block = only_match([requested_block_target](const gr::BlockHandle& block) {
+    if (auto* block = only_match([requested_block_target](const Block& block) {
             return block.name() == requested_block_target;
         })) {
         return block;
@@ -158,7 +185,7 @@ gr::BlockHandle* resolve_runtime_block(std::map<std::string, gr::BlockHandle, st
     if (const auto it = blocks.find(requested_block_target); it != blocks.end()) {
         return &it->second;
     }
-    return only_match([requested_block_target](const gr::BlockHandle& block) {
+    return only_match([requested_block_target](const Block& block) {
         return settings_name(block) == requested_block_target;
     });
 }
@@ -496,12 +523,20 @@ struct Gr4RuntimeManager::Execution {
     std::map<std::string, gr::BlockHandle, std::less<>> blocks;  // every block of the graph, by unique name
     bool running{false};
 
-    // The handles of the blocks alone, for a run that has ended. A handle keeps its block alive and reads the settings
-    // the run left.
-    std::unique_ptr<Execution> ended_blocks() const {
-        auto ended = std::make_unique<Execution>();
-        ended->blocks = blocks;
-        return ended;
+    // Called only after the runtime has joined its workers, including their stop hooks. Capture every value without
+    // a byte cap. A failed capture stays an explicit read error for that block and does not hide the other blocks.
+    std::map<std::string, CapturedBlock, std::less<>> capture_settings() const {
+        std::map<std::string, CapturedBlock, std::less<>> captured;
+        for (const auto& [unique_name, block] : blocks) {
+            CapturedBlock snapshot{unique_name, std::string(block.name()), std::string(block.typeName()), {}, {}};
+            try {
+                snapshot.settings = block.get();
+            } catch (const std::exception& error) {
+                snapshot.capture_error = std::format("final settings capture failed for block {}: {}", unique_name, error.what());
+            }
+            captured.emplace(unique_name, std::move(snapshot));
+        }
+        return captured;
     }
 };
 
@@ -519,8 +554,8 @@ struct Gr4RuntimeManager::SessionRuntimeResources {
     bool teardown_complete{true};
     std::optional<std::string> teardown_error;
     std::unique_ptr<Execution> execution;
-    // the blocks of the session's last ended run, read for their final settings until the next prepare or destroy
-    std::unique_ptr<Execution> ended_execution;
+    // The last run's final values, read until the next prepare or destroy. No block handles survive teardown.
+    std::optional<std::map<std::string, CapturedBlock, std::less<>>> ended_settings;
     std::vector<domain::RuntimeStreamBinding> stream_bindings;
     std::mutex mutex;
 };
@@ -605,7 +640,7 @@ void Gr4RuntimeManager::destroy(const domain::Session& session) {
         std::unique_lock resource_lock(resources->mutex);
         std::ignore = stop_locked(session, *resources, resource_lock);
         resources->execution.reset();
-        resources->ended_execution.reset();
+        resources->ended_settings.reset();
         release_stream_bindings_locked(*resources);
         resources->lifecycle_phase = LifecyclePhase::Idle;
         resources->teardown_complete = true;
@@ -745,7 +780,7 @@ gr::property_map Gr4RuntimeManager::get_block_settings(const domain::Session& se
     std::lock_guard resource_lock(resources->mutex);
 
     // the run in progress or a run that has ended unread, else the session's last ended run; a stopping run has neither
-    Execution* source = resources->ended_execution.get();
+    Execution* source = nullptr;
     if (auto* execution = resources->execution.get();
         execution != nullptr && execution->running && resources->lifecycle_phase == LifecyclePhase::Running) {
         using enum gr::Runtime::State;
@@ -755,6 +790,14 @@ gr::property_map Gr4RuntimeManager::get_block_settings(const domain::Session& se
         source = !stopping || runtime.waitFor(std::chrono::nanoseconds{0}) ? execution : nullptr;
     }
     if (source == nullptr) {
+        if (resources->execution == nullptr && resources->ended_settings.has_value()) {
+            auto& captured = *resources->ended_settings;
+            auto* block = resolve_runtime_block(captured, block_target);
+            if (block == nullptr) {
+                throw make_block_not_found_error(captured, block_target);
+            }
+            return block->get();
+        }
         throw not_running(session, "settings read");
     }
 
@@ -787,7 +830,7 @@ RunObservation Gr4RuntimeManager::observe(const domain::Session& session) {
         observation.run_error = result.error().message;
     }
     auto& resources = *run->resources;
-    resources.ended_execution = run->execution.ended_blocks();
+    resources.ended_settings = run->execution.capture_settings();
     // the graph goes first, then the ports its stream bindings held
     observation.ended_run = std::shared_ptr<Execution>(
         resources.execution.release(),
@@ -927,7 +970,7 @@ Gr4RuntimeManager::Execution& Gr4RuntimeManager::prepare_locked(const domain::Se
     }
 
     resources.execution = std::move(execution);
-    resources.ended_execution.reset();
+    resources.ended_settings.reset();
     resources.stream_bindings = std::move(stream_bindings);
     resources.generation += 1;
     resources.lifecycle_phase = LifecyclePhase::Idle;
@@ -975,7 +1018,7 @@ std::optional<std::string> Gr4RuntimeManager::stop_locked(const domain::Session&
     const auto result = execution->runtime->result();
 
     if (execution->running) {
-        resources.ended_execution = execution->ended_blocks();
+        resources.ended_settings = execution->capture_settings();
     }
     execution->running = false;
     release_stream_bindings_locked(resources);
