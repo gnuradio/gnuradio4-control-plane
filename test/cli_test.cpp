@@ -6,8 +6,11 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#include <sys/wait.h>
 #include <thread>
+
+#if !defined(_WIN32)
+#include <sys/wait.h>
+#endif
 
 #include <gtest/gtest.h>
 #include <httplib.h>
@@ -91,6 +94,10 @@ protected:
     }
 
     static std::string shell_quote(const std::string& value) {
+#if defined(_WIN32)
+        // cmd.exe has no single quotes, and nothing these tests pass contains a double quote
+        return "\"" + value + "\"";
+#else
         std::string quoted = "'";
         for (const char ch : value) {
             if (ch == '\'') {
@@ -101,11 +108,18 @@ protected:
         }
         quoted += "'";
         return quoted;
+#endif
     }
 
     std::pair<int, std::string> run_cli(const std::string& arguments) {
-        const std::string command = required_path("GR4CP_CLI_EXECUTABLE") + " " + arguments + " 2>&1";
+        // quoted, so that a build directory with spaces in its path still runs
+        const std::string command = shell_quote(required_path("GR4CP_CLI_EXECUTABLE")) + " " + arguments + " 2>&1";
+#if defined(_WIN32)
+        // cmd.exe strips the outermost pair of quotes from a /c command line, so the whole line gets one more pair
+        FILE* pipe = _popen(("\"" + command + "\"").c_str(), "r");
+#else
         FILE* pipe = popen(command.c_str(), "r");
+#endif
         if (pipe == nullptr) {
             return {1, "failed to launch CLI"};
         }
@@ -116,11 +130,16 @@ protected:
             output += buffer;
         }
 
+#if defined(_WIN32)
+        // _pclose reports the exit code itself rather than a wait status
+        return {_pclose(pipe), output};
+#else
         const int status = pclose(pipe);
         if (WIFEXITED(status)) {
             return {WEXITSTATUS(status), output};
         }
         return {1, output};
+#endif
     }
 
     std::unique_ptr<gr4cp::api::HttpServer> server;

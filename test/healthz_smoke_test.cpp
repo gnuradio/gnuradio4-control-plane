@@ -1,6 +1,8 @@
 #include "gr4cp/api/http_server.hpp"
 
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 
 #include <array>
 #include <chrono>
@@ -39,8 +41,16 @@ std::string required_path(const char* name) {
 
 // Runs the server executable with `arguments` and returns its exit status and standard output.
 std::pair<int, std::string> run_server(const std::string& arguments) {
-    const std::string command = required_path("GR4CP_SERVER_EXECUTABLE") + " " + arguments + " 2>/dev/null";
+#if defined(_WIN32)
+    // quoted for a build directory with spaces in its path; cmd.exe strips the outermost pair of quotes from a /c
+    // command line, so the whole line gets one more pair
+    const std::string command =
+        "\"\"" + required_path("GR4CP_SERVER_EXECUTABLE") + "\" " + arguments + " 2>NUL\"";
+    FILE* pipe = _popen(command.c_str(), "r");
+#else
+    const std::string command = "'" + required_path("GR4CP_SERVER_EXECUTABLE") + "' " + arguments + " 2>/dev/null";
     FILE* pipe = popen(command.c_str(), "r");
+#endif
     if (pipe == nullptr) {
         return {-1, "failed to launch the server"};
     }
@@ -49,8 +59,13 @@ std::pair<int, std::string> run_server(const std::string& arguments) {
     while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
         output += buffer.data();
     }
+#if defined(_WIN32)
+    // _pclose reports the exit code itself rather than a wait status
+    return {_pclose(pipe), output};
+#else
     const int status = pclose(pipe);
     return {WIFEXITED(status) ? WEXITSTATUS(status) : -1, output};
+#endif
 }
 
 class EmptyBlockCatalogProvider final : public gr4cp::catalog::BlockCatalogProvider {
