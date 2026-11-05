@@ -1804,11 +1804,12 @@ connections:
 }
 
 // Twenty sessions go through create, start, stop and delete over HTTP, each request on whichever server thread takes
-// it. The first session starts the thread pools the scheduler and the blocks keep for the process's life, and the
-// baseline is read after it. The case counts the bytes in live heap allocations, where a deleted session that is still
-// held keeps its graph. The twenty sessions together must leave less than the smallest heap one running session took.
-// The resident size is printed but not bounded. It counts the freed memory the allocator keeps, and the address
-// sanitizer keeps up to 256 MB of freed blocks to catch a use after free.
+// it. The first session starts the thread pools the scheduler and the blocks use, and the baseline is read after it. A
+// pool may let an idle worker above its minimum go after its keep-alive, so the count after the sessions may fall below
+// the baseline but must not stay above it. The case counts the bytes in live heap allocations, where a deleted session
+// that is still held keeps its graph. The twenty sessions together must leave less than the smallest heap one running
+// session took. The resident size is printed but not bounded. It counts the freed memory the allocator keeps, and the
+// address sanitizer keeps up to 256 MB of freed blocks to catch a use after free.
 TEST_F(RealRuntimeHttpApiTest, DeletedSessionsReturnTheirThreadsAndMemory) {
     if (!live_heap_bytes().has_value()) {
         GTEST_SKIP() << "this C library gives no count of live heap bytes";
@@ -1864,15 +1865,15 @@ connections:
         run_session();
     }
 
-    // a run's threads are joined when its session is deleted; a thread still exiting leaves the count within the five
-    // seconds below
+    // a run's threads are joined when its session is deleted; a thread still exiting leaves the count within the
+    // fifteen seconds below, longer than the pool's ten second keep-alive for a worker a later session made it add
     auto after = process_status();
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (after.threads != baseline.threads && std::chrono::steady_clock::now() < deadline) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    while (after.threads > baseline.threads && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         after = process_status();
     }
-    EXPECT_EQ(after.threads, baseline.threads);
+    EXPECT_LE(after.threads, baseline.threads) << "a session left a thread running";
 
     ASSERT_FALSE(running_heaps.empty());
     const auto session_heap = std::ranges::min(running_heaps);
