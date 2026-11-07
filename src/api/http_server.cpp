@@ -13,6 +13,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -898,7 +899,23 @@ struct gr4cp::api::HttpServer::Impl {
     }
 
     app::SessionService& session_service;
-    httplib::Server internal_server;
+    class InternalServer : public httplib::Server {
+    public:
+        int bind_for_proxy() {
+            const int port = bind_to_any_port("127.0.0.1");
+            // cpp-httplib defaults to a backlog of five, while the public
+            // listener admits concurrent bursts. Dropping SYNs on this local
+            // hop turns healthy requests into one-second connect timeouts/502s.
+            // Set the actual socket: a macro override cannot affect a separately
+            // compiled cpp-httplib library.
+            if (port <= 0 || ::listen(svr_sock_.load(), SOMAXCONN) != 0) {
+                stop();
+                throw std::runtime_error("failed to bind internal HTTP proxy listener");
+            }
+            return port;
+        }
+    };
+    InternalServer internal_server;
     int internal_port_{0};
 
     std::size_t connection_worker_count() {
@@ -910,7 +927,7 @@ struct gr4cp::api::HttpServer::Impl {
 private:
     void ensure_internal_bound() {
         if (internal_port_ == 0) {
-            internal_port_ = internal_server.bind_to_any_port("127.0.0.1");
+            internal_port_ = internal_server.bind_for_proxy();
         }
     }
 
