@@ -4,6 +4,7 @@
 #include "gr4cp/runtime/stream_binding_allocator.hpp"
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -15,6 +16,8 @@
 
 namespace gr {
 class PluginLoader;
+struct Graph;
+class SchedulerModel;
 }
 
 namespace gr4cp::runtime {
@@ -41,6 +44,35 @@ public:
     // Registers the package's scheduler aliases. A document's nested scheduler can name one from the first session on.
     explicit Gr4RuntimeManager(std::shared_ptr<gr::PluginLoader> loader);
     ~Gr4RuntimeManager() override;
+
+    // Local application hook, never a wire-format graph. Called under the session
+    // resource lock before the sole scheduler is created. Must not re-enter this
+    // runtime. Return exclusive graph ownership; throw to abort preparation.
+    // The factory survives stop/restart and is released by destroy. Each restart
+    // rebuilds the graph; execution-local settings/subscriptions do not persist.
+    using NativeGraphFactory =
+        std::function<std::unique_ptr<gr::Graph>(const domain::Session &, std::uint64_t generation)>;
+    // Synchronous application hooks run under the session resource mutex. References
+    // must not escape and callbacks must not re-enter runtime/lifecycle/message waits.
+    // started=true follows scheduler start; false follows stop, before graph destruction.
+    using NativeExecutionHook = std::function<void(gr::SchedulerModel &, std::uint64_t, bool started)>;
+    void set_native_graph_factory(const domain::Session &session, NativeGraphFactory factory,
+                                  NativeExecutionHook hook = {});
+    void with_execution(const domain::Session &session, std::uint64_t generation,
+                        const std::function<void(gr::SchedulerModel &)> &operation);
+    void with_execution(const domain::Session &session, std::uint64_t generation,
+                        const std::function<void(gr::SchedulerModel &)> &operation, bool allow_paused);
+    struct ExecutionStatus {
+        std::uint64_t generation;
+        std::string state;
+    };
+    ExecutionStatus execution_status(const domain::Session &session);
+
+    void restart(const domain::Session &) override;
+    void pause(const domain::Session &) override;
+    void pause(const domain::Session &, std::uint64_t);
+    void resume(const domain::Session &) override;
+    void resume(const domain::Session &, std::uint64_t);
 
     void prepare(const domain::Session& session) override;
     void start(const domain::Session& session) override;
@@ -76,6 +108,7 @@ private:
     std::optional<RunningExecution> running_execution(const domain::Session& session);
     std::optional<RunningExecution> live_execution(const domain::Session& session);
     Execution& prepare_locked(const domain::Session& session, SessionRuntimeResources& resources);
+    void change_pause(const domain::Session &, std::optional<std::uint64_t> generation, bool paused);
     void release_stream_bindings_locked(SessionRuntimeResources& resources);
     std::optional<std::string> stop_locked(const domain::Session& session,
                                            SessionRuntimeResources& resources,
@@ -85,6 +118,7 @@ private:
     StreamBindingAllocator stream_allocator_;
     std::unordered_map<std::string, std::shared_ptr<SessionRuntimeResources>> resources_;
     std::mutex resources_mutex_;
+    std::uint64_t next_generation_ = 0;
 };
 
 }  // namespace gr4cp::runtime
