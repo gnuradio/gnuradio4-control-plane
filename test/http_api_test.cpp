@@ -1155,6 +1155,28 @@ TEST_F(HttpApiTest, CompletedWorkersAreReapedWithoutAnotherRequest) {
     EXPECT_TRUE(wait_for_workers(0));
 }
 
+TEST_F(HttpApiTest, ConcurrentAndDisconnectedWorkersAreReaped) {
+    std::vector<std::future<void>> clients;
+    for (int i = 0; i < 16; ++i) {
+        clients.push_back(std::async(std::launch::async, [this] {
+            httplib::Client local("127.0.0.1", port);
+            for (int j = 0; j < 20; ++j) {
+                const auto response = local.Get("/healthz");
+                ASSERT_TRUE(response);
+                ASSERT_EQ(response->status, 200) << response->body;
+                asio::io_context context;
+                tcp::socket disconnected(context);
+                disconnected.connect({asio::ip::make_address("127.0.0.1"), static_cast<unsigned short>(port)});
+                asio::write(disconnected, asio::buffer(std::string("GET /healthz HTTP/1.1\r\n")));
+            }
+        }));
+    }
+    for (auto& request : clients) request.get();
+    // A final response fences acceptance of earlier connect/disconnect bursts.
+    ASSERT_TRUE(client->Get("/healthz"));
+    EXPECT_TRUE(wait_for_workers(0));
+}
+
 TEST_F(HttpApiTest, SlowHttpWorkerSurvivesReapingAndStopCancelsReadWithinDeadline) {
     asio::io_context context;
     tcp::socket slow(context);
@@ -1167,6 +1189,57 @@ TEST_F(HttpApiTest, SlowHttpWorkerSurvivesReapingAndStopCancelsReadWithinDeadlin
     slow.close();
     EXPECT_EQ(stopped.wait_for(std::chrono::seconds(3)), std::future_status::ready);
     stopped.get();
+    EXPECT_EQ(gr4cp::api::HttpServerTestAccess::workers(*server), 0U);
+}
+
+TEST_F(HttpApiTest, SlowHandlerAndClientDisconnectDoNotBlockOtherReclamation) {
+    const auto id = create_running_session();
+    runtime_manager.block_stop_for(id);
+    auto pending = std::async(std::launch::async, [this, id] { return post_with_fresh_client("/sessions/" + id + "/stop"); });
+    const bool entered = runtime_manager.wait_for_stop_entry(id);
+    EXPECT_TRUE(entered);
+    for (int i = 0; i < 30; ++i) EXPECT_TRUE(client->Get("/healthz"));
+    EXPECT_TRUE(wait_for_workers(1));
+    runtime_manager.release_stop_for(id);
+    EXPECT_TRUE(pending.get());
+    EXPECT_TRUE(wait_for_workers(0));
+
+    const auto other = create_running_session();
+    runtime_manager.block_stop_for(other);
+    asio::io_context context;
+    tcp::socket disconnected(context);
+    disconnected.connect({asio::ip::make_address("127.0.0.1"), static_cast<unsigned short>(port)});
+    asio::write(disconnected, asio::buffer("POST /sessions/" + other + "/stop HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n"));
+    EXPECT_TRUE(runtime_manager.wait_for_stop_entry(other));
+    disconnected.close();
+    runtime_manager.release_stop_for(other);
+    EXPECT_TRUE(wait_for_workers(0));
+}
+
+TEST_F(HttpApiTest, FailedRequestWorkersAreReaped) {
+    const auto id = create_running_session();
+    runtime_manager.stop_exception = std::make_exception_ptr(std::runtime_error("worker reclamation test"));
+    const auto response = post_with_fresh_client("/sessions/" + id + "/stop");
+    ASSERT_TRUE(response);
+    EXPECT_EQ(response->status, 500);
+    EXPECT_TRUE(wait_for_workers(0));
+    EXPECT_TRUE(client->Get("/healthz"));
+    EXPECT_TRUE(wait_for_workers(0));
+}
+
+TEST_F(HttpApiTest, WebsocketSurvivesReapingThenServerStopJoinsItsWorker) {
+    const auto id = create_session_with_graph(authored_websocket_graph())["id"].get<std::string>();
+    ASSERT_TRUE(post_with_fresh_client("/sessions/" + id + "/start"));
+    auto stream = connect_websocket("/sessions/" + id + "/streams/series0/ws");
+    ASSERT_TRUE(runtime_manager.wait_for_websocket_connection(id, "series0"));
+    for (int round = 0; round < 20; ++round) {
+        for (int i = 0; i < 100; ++i) ASSERT_TRUE(client->Get("/healthz"));
+        EXPECT_TRUE(wait_for_workers(1));
+        runtime_manager.send_websocket_text(id, "series0", "still connected " + std::to_string(round));
+        EXPECT_EQ(read_websocket_text(stream), "still connected " + std::to_string(round));
+    }
+    server->stop();
+    EXPECT_TRUE(wait_for_websocket_close(stream));
     EXPECT_EQ(gr4cp::api::HttpServerTestAccess::workers(*server), 0U);
 }
 
