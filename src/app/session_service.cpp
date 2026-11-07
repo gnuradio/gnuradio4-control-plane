@@ -55,6 +55,7 @@ SessionService::InternalLifecyclePhase SessionService::phase_for_locked(const do
     switch (session.state) {
     case domain::SessionState::Stopped:
         return InternalLifecyclePhase::Idle;
+    case domain::SessionState::Paused:
     case domain::SessionState::Running:
         return InternalLifecyclePhase::Running;
     case domain::SessionState::Error:
@@ -126,7 +127,8 @@ domain::Session SessionService::start(const std::string& id) {
         session = observe_locked(load_or_throw(id), ended_runs, lock);
         const auto phase = phase_for_locked(session);
 
-        if (session.state == domain::SessionState::Running || phase == InternalLifecyclePhase::Running) {
+        if ((session.state == domain::SessionState::Running || session.state == domain::SessionState::Paused) ||
+            phase == InternalLifecyclePhase::Running) {
             throw InvalidStateError("session already running: " + id);
         }
         if (phase == InternalLifecyclePhase::Starting) {
@@ -230,13 +232,7 @@ domain::Session SessionService::restart(const std::string& id) {
     ended_runs.clear();
 
     try {
-        if (session.state == domain::SessionState::Running) {
-            runtime_manager_.stop(session);
-            session.state = domain::SessionState::Stopped;
-        }
-        runtime_manager_.destroy(session);
-        runtime_manager_.prepare(session);
-        runtime_manager_.start(session);
+        runtime_manager_.restart(session);
     } catch (const std::exception& error) {
         record_runtime_failure(std::move(session), runtime_message("restart", id, error), std::nullopt);
     } catch (...) {
@@ -276,7 +272,7 @@ void SessionService::remove(const std::string& id) {
     ended_runs.clear();
 
     try {
-        if (session.state == domain::SessionState::Running) {
+        if (session.state == domain::SessionState::Running || session.state == domain::SessionState::Paused) {
             runtime_manager_.stop(session);
             session.state = domain::SessionState::Stopped;
         }
@@ -359,7 +355,8 @@ std::optional<domain::Session> SessionService::running_session(const std::string
     std::vector<std::shared_ptr<void>> ended_runs;
     std::unique_lock lock(mutex_);
     auto session = observe_locked(load_or_throw(id), ended_runs, lock);
-    if (session.state != domain::SessionState::Running || phase_for_locked(session) != InternalLifecyclePhase::Running) {
+    if ((session.state != domain::SessionState::Running && session.state != domain::SessionState::Paused) ||
+        phase_for_locked(session) != InternalLifecyclePhase::Running) {
         return std::nullopt;
     }
     return session;
@@ -369,7 +366,8 @@ domain::Session SessionService::observe_locked(domain::Session session, std::vec
                                                 std::unique_lock<std::mutex>& lock) {
     observation_finished_.wait(lock, [&] { return phase_for_locked(session) != InternalLifecyclePhase::Observing; });
     session = load_or_throw(session.id);
-    if (session.state != domain::SessionState::Running || phase_for_locked(session) != InternalLifecyclePhase::Running) {
+    if ((session.state != domain::SessionState::Running && session.state != domain::SessionState::Paused) ||
+        phase_for_locked(session) != InternalLifecyclePhase::Running) {
         return session;
     }
 
@@ -454,3 +452,50 @@ void SessionService::erase_phase_locked(const std::string& id) {
 }
 
 }  // namespace gr4cp::app
+
+namespace gr4cp::app {
+namespace {
+domain::Session change_pause(storage::SessionRepository &repository, runtime::RuntimeManager &runtime,
+                             const std::string &id, const std::string &execution_id, bool paused) {
+    auto found = repository.get(id);
+    if (!found)
+        throw NotFoundError("session not found: " + id);
+    auto session = *found;
+    if (session.state != domain::SessionState::Running && session.state != domain::SessionState::Paused)
+        throw InvalidStateError("session must have an active execution: " + id);
+    if (!session.execution_id || *session.execution_id != execution_id)
+        throw InvalidStateError("stale execution identity: " + id);
+    try {
+        if (paused)
+            runtime.pause(session);
+        else
+            runtime.resume(session);
+    } catch (const std::exception &error) {
+        const std::string message(error.what());
+        if (message.find("not active") != std::string::npos)
+            throw InvalidStateError(message);
+        throw RuntimeError(message);
+    }
+    session.state = paused ? domain::SessionState::Paused : domain::SessionState::Running;
+    session.updated_at = std::chrono::system_clock::now();
+    repository.update(session);
+    return session;
+}
+} // namespace
+domain::Session SessionService::pause(const std::string &id, const std::string &execution_id) {
+    std::vector<std::shared_ptr<void>> ended_runs;
+    std::unique_lock lock(mutex_);
+    observe_locked(load_or_throw(id), ended_runs, lock);
+    if (phases_.contains(id) && phases_[id] != InternalLifecyclePhase::Running)
+        throw InvalidStateError("session lifecycle busy: " + id);
+    return change_pause(repository_, runtime_manager_, id, execution_id, true);
+}
+domain::Session SessionService::resume(const std::string &id, const std::string &execution_id) {
+    std::vector<std::shared_ptr<void>> ended_runs;
+    std::unique_lock lock(mutex_);
+    observe_locked(load_or_throw(id), ended_runs, lock);
+    if (phases_.contains(id) && phases_[id] != InternalLifecyclePhase::Running)
+        throw InvalidStateError("session lifecycle busy: " + id);
+    return change_pause(repository_, runtime_manager_, id, execution_id, false);
+}
+} // namespace gr4cp::app

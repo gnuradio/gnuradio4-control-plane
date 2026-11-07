@@ -615,12 +615,17 @@ class HttpApiTest : public ::testing::Test {
 protected:
     class FakeRuntimeManager final : public gr4cp::runtime::RuntimeManager {
     public:
-        ~FakeRuntimeManager() override {
-            for (auto& [_, source] : websocket_sources) {
-                if (source) {
-                    source->stop();
-                }
-            }
+      int pause_requests = 0;
+      int resume_requests = 0;
+      void pause(const gr4cp::domain::Session &) override { ++pause_requests; }
+      void resume(const gr4cp::domain::Session &) override { ++resume_requests; }
+
+      ~FakeRuntimeManager() override {
+          for (auto &[_, source] : websocket_sources) {
+              if (source) {
+                  source->stop();
+              }
+          }
         }
 
         void prepare(const gr4cp::domain::Session& session) override {
@@ -3633,6 +3638,37 @@ TEST_F(HttpApiTest, BlockSettingsNestedObjectRoundTrips) {
     const auto body = parse_json(get_response);
     EXPECT_EQ(body["settings"]["nested"]["gain"], 3.0);
     EXPECT_EQ(body["settings"]["nested"]["enabled"], true);
+}
+
+TEST_F(HttpApiTest, PauseResumeValidateAndPreserveOpaqueIdentity) {
+    const auto id = create_running_session();
+    const auto before = parse_json(client->Get(("/sessions/" + id).c_str()));
+    ASSERT_TRUE(before.contains("execution_id"));
+    const auto identity = before["execution_id"];
+    for (const std::string body : {R"({})", R"({"execution_id":1})", R"({"execution_id":""})"}) {
+        const auto response = client->Post(("/sessions/" + id + "/pause").c_str(), body, "application/json");
+        ASSERT_TRUE(response);
+        EXPECT_EQ(response->status, 400) << response->body;
+    }
+    auto response =
+        client->Post(("/sessions/" + id + "/pause").c_str(), R"({"execution_id":"stale"})", "application/json");
+    ASSERT_TRUE(response);
+    EXPECT_EQ(response->status, 409) << response->body;
+    EXPECT_EQ(runtime_manager.pause_requests, 0);
+    response = client->Post(("/sessions/" + id + "/pause").c_str(), nlohmann::json{{"execution_id", identity}}.dump(),
+                            "application/json");
+    ASSERT_TRUE(response);
+    ASSERT_EQ(response->status, 200) << response->body;
+    EXPECT_EQ(parse_json(response)["state"], "paused");
+    EXPECT_EQ(parse_json(response)["execution_id"], identity);
+    response = client->Post(("/sessions/" + id + "/resume").c_str(), nlohmann::json{{"execution_id", identity}}.dump(),
+                            "application/json");
+    ASSERT_TRUE(response);
+    ASSERT_EQ(response->status, 200) << response->body;
+    EXPECT_EQ(parse_json(response)["state"], "running");
+    EXPECT_EQ(parse_json(response)["execution_id"], identity);
+    EXPECT_EQ(runtime_manager.pause_requests, 1);
+    EXPECT_EQ(runtime_manager.resume_requests, 1);
 }
 
 }  // namespace

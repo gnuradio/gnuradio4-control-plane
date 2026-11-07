@@ -21,10 +21,12 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <tuple>
 #include <utility>
 #include <vector>
 
+#include <gnuradio-4.0/Graph.hpp>
 #include <gnuradio-4.0/PluginLoader.hpp>
 #include <gnuradio-4.0/Runtime.hpp>
 #include <gnuradio-4.0/SchedulerModel.hpp>
@@ -524,6 +526,9 @@ struct Gr4RuntimeManager::SessionRuntimeResources {
     // The last run's final values, read until the next prepare or destroy. No block handles survive teardown.
     std::optional<std::map<std::string, CapturedBlock, std::less<>>> ended_settings;
     std::vector<domain::RuntimeStreamBinding> stream_bindings;
+    NativeGraphFactory native_graph_factory;
+    NativeExecutionHook native_execution_hook;
+    std::optional<std::string> async_error;
     std::mutex mutex;
 };
 
@@ -563,6 +568,125 @@ void Gr4RuntimeManager::prepare(const domain::Session& session) {
     (void)prepare_locked(session, *resources);
 }
 
+void Gr4RuntimeManager::set_native_graph_factory(const domain::Session &session, NativeGraphFactory factory,
+                                                 NativeExecutionHook hook) {
+    auto resources = get_or_create_resources(session);
+    std::lock_guard resource_lock(resources->mutex);
+    if (resources->execution || resources->lifecycle_phase == LifecyclePhase::Stopping) {
+        throw runtime_error(session, "register native graph",
+                            "execution already prepared; stop it before changing its factory");
+    }
+    resources->native_graph_factory = std::move(factory);
+    resources->native_execution_hook = std::move(hook);
+}
+
+Gr4RuntimeManager::ExecutionStatus Gr4RuntimeManager::execution_status(const domain::Session &session) {
+    auto resources = find_resources(session.id);
+    if (!resources)
+        return {0, "unprepared"};
+    std::lock_guard lock(resources->mutex);
+    auto *execution = resources->execution.get();
+    if (execution && execution->runtime->state() == gr::Runtime::State::Error) {
+        resources->lifecycle_phase = LifecyclePhase::Failed;
+        resources->async_error = "native execution entered ERROR";
+    }
+    return {resources->generation,
+            (resources->async_error || resources->lifecycle_phase == LifecyclePhase::Failed) ? "failed"
+            : execution && execution->running
+                ? (execution->runtime->state() == gr::Runtime::State::Paused ? "paused" : "running")
+                : "stopped"};
+}
+
+void Gr4RuntimeManager::with_execution(const domain::Session &session, std::uint64_t generation,
+                                       const std::function<void(gr::SchedulerModel &)> &operation) {
+    with_execution(session, generation, operation, false);
+}
+
+void Gr4RuntimeManager::with_execution(const domain::Session &session, std::uint64_t generation,
+                                       const std::function<void(gr::SchedulerModel &)> &operation, bool allow_paused) {
+    auto resources = find_resources(session.id);
+    if (!resources)
+        throw runtime_error(session, "native operation", "session execution absent");
+    std::lock_guard lock(resources->mutex);
+    auto *execution = resources->execution.get();
+    if (generation != resources->generation)
+        throw runtime_error(session, "native operation", "stale execution generation");
+    if (!execution || !execution->running || resources->lifecycle_phase != LifecyclePhase::Running ||
+        (execution->runtime->state() != gr::Runtime::State::Running &&
+         !(allow_paused && execution->runtime->state() == gr::Runtime::State::Paused)))
+        throw runtime_error(session, "native operation", "execution is not running");
+    auto record_failure = [&] {
+        if (execution->runtime->state() == gr::Runtime::State::Error) {
+            resources->lifecycle_phase = LifecyclePhase::Failed;
+            resources->async_error = "native execution entered ERROR";
+        }
+    };
+    auto refresh_blocks = [&] {
+        std::map<std::string, gr::BlockHandle, std::less<>> current;
+        for (auto &block : execution->runtime->blocks())
+            current.emplace(std::string(block.uniqueName()), block);
+        execution->blocks.swap(current);
+    };
+    try {
+        execution->runtime->withScheduler(operation);
+    } catch (...) {
+        refresh_blocks();
+        record_failure();
+        throw;
+    }
+    refresh_blocks();
+    record_failure();
+    if (resources->async_error)
+        throw runtime_error(session, "native operation", *resources->async_error);
+}
+
+void Gr4RuntimeManager::pause(const domain::Session &session) { change_pause(session, std::nullopt, true); }
+void Gr4RuntimeManager::resume(const domain::Session &session) { change_pause(session, std::nullopt, false); }
+void Gr4RuntimeManager::pause(const domain::Session &session, std::uint64_t generation) {
+    change_pause(session, generation, true);
+}
+void Gr4RuntimeManager::resume(const domain::Session &session, std::uint64_t generation) {
+    change_pause(session, generation, false);
+}
+
+void Gr4RuntimeManager::change_pause(const domain::Session &session, std::optional<std::uint64_t> generation,
+                                     bool paused) {
+    auto resources = find_resources(session.id);
+    if (!resources)
+        throw runtime_error(session, "pause/resume", "execution absent");
+    std::lock_guard lock(resources->mutex);
+    if (generation && *generation != resources->generation)
+        throw runtime_error(session, "pause/resume", "stale execution generation");
+    auto *execution = resources->execution.get();
+    if (!execution || !execution->running || resources->lifecycle_phase != LifecyclePhase::Running)
+        throw runtime_error(session, "pause/resume", "execution is not active");
+    execution->runtime->withScheduler([&](gr::SchedulerModel &scheduler) {
+        auto &block = *scheduler.asBlockModel();
+        const auto target = paused ? gr::lifecycle::State::PAUSED : gr::lifecycle::State::RUNNING;
+        if (block.state() == target)
+            return;
+        const auto expected = paused ? gr::lifecycle::State::RUNNING : gr::lifecycle::State::PAUSED;
+        if (block.state() != expected)
+            throw runtime_error(session, "pause/resume", "execution is not active");
+        const auto request = paused ? gr::lifecycle::State::REQUESTED_PAUSE : gr::lifecycle::State::RUNNING;
+        if (auto changed = block.changeStateTo(request); !changed)
+            throw runtime_error(session, "pause/resume", changed.error().message);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (block.state() != target) {
+            if (block.state() == gr::lifecycle::State::ERROR || std::chrono::steady_clock::now() >= deadline)
+                throw runtime_error(session, "pause/resume", "execution did not settle in requested state");
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    });
+}
+
+void Gr4RuntimeManager::restart(const domain::Session &session) {
+    stop(session);
+    // prepare replaces the ended execution but retains the native factory and its provider.
+    prepare(session);
+    start(session);
+}
+
 void Gr4RuntimeManager::start(const domain::Session& session) {
     auto resources = get_or_create_resources(session);
     std::unique_lock resource_lock(resources->mutex);
@@ -585,6 +709,24 @@ void Gr4RuntimeManager::start(const domain::Session& session) {
     }
     execution.running = true;
     resources->lifecycle_phase = LifecyclePhase::Running;
+    try {
+        if (resources->native_graph_factory)
+            execution.runtime->withScheduler([&](gr::SchedulerModel &scheduler) {
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+                while (!scheduler.workerStarted()) {
+                    if (execution.runtime->waitFor(std::chrono::nanoseconds{0}) ||
+                        std::chrono::steady_clock::now() >= deadline)
+                        throw runtime_error(session, "native initialization", "worker did not start");
+                    std::this_thread::yield();
+                }
+                if (resources->native_execution_hook)
+                    resources->native_execution_hook(scheduler, resources->generation, true);
+            });
+    } catch (...) {
+        execution.runtime->stop();
+        resources->lifecycle_phase = LifecyclePhase::Failed;
+        throw;
+    }
 }
 
 std::optional<std::string> Gr4RuntimeManager::stop(const domain::Session& session) {
@@ -797,6 +939,18 @@ RunObservation Gr4RuntimeManager::observe(const domain::Session& session) {
         observation.run_error = result.error().message;
     }
     auto& resources = *run->resources;
+    if (resources.native_execution_hook) {
+        try {
+            runtime.withScheduler([&](gr::SchedulerModel &scheduler) {
+                resources.native_execution_hook(scheduler, resources.generation, false);
+            });
+        } catch (const std::exception &error) {
+            observation.run_error = error.what();
+        }
+    }
+    if (!observation.run_error)
+        observation.run_error = resources.async_error;
+    resources.async_error = observation.run_error;
     resources.ended_settings = run->execution.capture_settings();
     // the graph goes first, then the ports its stream bindings held
     observation.ended_run = std::shared_ptr<Execution>(
@@ -906,6 +1060,13 @@ Gr4RuntimeManager::Execution& Gr4RuntimeManager::prepare_locked(const domain::Se
     }
 
     auto execution = std::make_unique<Execution>();
+    std::uint64_t generation;
+    {
+        std::lock_guard lock(resources_mutex_);
+        if (next_generation_ == UINT64_MAX)
+            throw runtime_error(session, "prepare", "generation exhausted");
+        generation = ++next_generation_;
+    }
     try {
         std::map<std::string, gr::property_map, std::less<>> overrides;
         for (const auto& binding : stream_bindings) {
@@ -914,7 +1075,11 @@ Gr4RuntimeManager::Execution& Gr4RuntimeManager::prepare_locked(const domain::Se
                 {"transport", binding.plan.transport},
             };
         }
-        auto graph = gr::RuntimeGraph::fromYaml(loader_, normalize_graph_content(session.grc_content, stream_bindings), overrides);
+        auto graph = resources.native_graph_factory
+                         ? std::expected<gr::RuntimeGraph, gr::RuntimeError>(
+                               gr::RuntimeGraph::adopt(resources.native_graph_factory(session, generation), loader_))
+                         : gr::RuntimeGraph::fromYaml(
+                               loader_, normalize_graph_content(session.grc_content, stream_bindings), overrides);
         if (!graph.has_value()) {
             throw std::runtime_error(graph.error().message);
         }
@@ -939,7 +1104,8 @@ Gr4RuntimeManager::Execution& Gr4RuntimeManager::prepare_locked(const domain::Se
     resources.execution = std::move(execution);
     resources.ended_settings.reset();
     resources.stream_bindings = std::move(stream_bindings);
-    resources.generation += 1;
+    resources.generation = generation;
+    resources.async_error.reset();
     resources.lifecycle_phase = LifecyclePhase::Idle;
     resources.teardown_complete = true;
     resources.teardown_error.reset();
@@ -980,11 +1146,29 @@ std::optional<std::string> Gr4RuntimeManager::stop_locked(const domain::Session&
     const bool ended_by_itself = execution->runtime->waitFor(std::chrono::nanoseconds{0}) ||
                                  execution->runtime->state() == gr::Runtime::State::Error;
     if (execution->running) {
+        // Native controllers can finalize the accepted downstream tail. Keep the
+        // ordinary serialized-graph Stop behavior supplied by the base unchanged.
+        if (resources.native_graph_factory && !ended_by_itself &&
+            execution->runtime->state() != gr::Runtime::State::Paused) {
+            execution->runtime->withScheduler([&](gr::SchedulerModel &scheduler) {
+                if (!scheduler.stopAfterDrain(std::chrono::seconds(5)))
+                    resources.async_error = "native downstream drain failed or exceeded its deadline";
+            });
+        }
         execution->runtime->stop();
     }
     const auto result = execution->runtime->result();
 
     if (execution->running) {
+        if (resources.native_execution_hook) {
+            try {
+                execution->runtime->withScheduler([&](gr::SchedulerModel &scheduler) {
+                    resources.native_execution_hook(scheduler, resources.generation, false);
+                });
+            } catch (const std::exception &error) {
+                resources.async_error = error.what();
+            }
+        }
         resources.ended_settings = execution->capture_settings();
     }
     execution->running = false;
@@ -998,6 +1182,8 @@ std::optional<std::string> Gr4RuntimeManager::stop_locked(const domain::Session&
     }
     resources.lifecycle_phase = LifecyclePhase::Idle;
     resources.teardown_error.reset();
+    if (resources.async_error)
+        return resources.async_error;
     return result.has_value() ? std::nullopt : std::optional<std::string>(result.error().message);
 }
 

@@ -10,6 +10,7 @@ namespace gr4cp::domain {
 enum class SessionState {
     Stopped,
     Running,
+    Paused,
     Error,
 };
 
