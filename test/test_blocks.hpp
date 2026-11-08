@@ -275,6 +275,7 @@ struct TerminalSettingsSource : gr::Block<TerminalSettingsSource> {
     GR_MAKE_REFLECTABLE(TerminalSettingsSource, out, n_samples, finalization, payload);
     explicit TerminalSettingsSource(gr::property_map init = {}) : gr::Block<TerminalSettingsSource>(std::move(init)) {}
     static std::int64_t alive() noexcept { return LiveInstances::count(); }
+    static std::size_t work_calls() noexcept { return work_calls_.load(std::memory_order_acquire); }
 
     void stop() {
         finalization = {{"unique_name", std::string(this->unique_name)},
@@ -289,11 +290,13 @@ struct TerminalSettingsSource : gr::Block<TerminalSettingsSource> {
         const auto n = n_samples == 0U ? output.size() : std::min<std::size_t>(output.size(), n_samples - produced_);
         std::fill_n(output.begin(), n, 0.0F);
         output.publish(n);
+        work_calls_.fetch_add(1, std::memory_order_release);
         produced_ += static_cast<gr::Size_t>(n);
         return n_samples != 0U && produced_ >= n_samples ? gr::work::Status::DONE : gr::work::Status::OK;
     }
 
 private:
+    static inline std::atomic<std::size_t> work_calls_{0};
     LiveInstances live_;
     gr::Size_t produced_ = 0U;
 };

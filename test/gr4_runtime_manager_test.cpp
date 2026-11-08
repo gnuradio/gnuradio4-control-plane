@@ -881,8 +881,16 @@ TEST(TerminalSettingsRuntimeTest, FinalSettingsSurviveBlockDestructionWithoutTru
 connections:
   - ["terminal_unique", 0, "sink0", 0]
 )", finite ? 64 : 0));
+        const auto work_before_start = gr4cp::test::TerminalSettingsSource::work_calls();
         const auto started = service.start(created.id);
         ASSERT_TRUE(started.execution_id.has_value());
+        // start() accepts an asynchronous run. Stop-hook receipts require a source that actually entered work().
+        const auto work_deadline = std::chrono::steady_clock::now() + 10s;
+        while (gr4cp::test::TerminalSettingsSource::work_calls() == work_before_start &&
+               std::chrono::steady_clock::now() < work_deadline) {
+            std::this_thread::sleep_for(1ms);
+        }
+        ASSERT_GT(gr4cp::test::TerminalSettingsSource::work_calls(), work_before_start);
         const auto ended = finite ? read_until(service, created.id, [](const auto& session) {
             return session.state != gr4cp::domain::SessionState::Running;
         }) : service.stop(created.id);
