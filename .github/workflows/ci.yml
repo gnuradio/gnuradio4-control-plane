@@ -100,6 +100,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Prefer rebuilt SDK libraries at runtime
+        shell: bash
+        run: |
+          # The image's LD_LIBRARY_PATH takes precedence over CMake's RUNPATH, including during test discovery.
+          echo "LD_LIBRARY_PATH=/opt/gr4cp-sdk/lib:/opt/gr4cp-sdk/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" >> "$GITHUB_ENV"
+
       # The published main SDK predates native Runtime adoption (Core #224). Rebuild its Blocks revision against
       # the required Core so headers, libraries and registered plugins all use the same ABI.
       - name: Read Blocks SDK revision
