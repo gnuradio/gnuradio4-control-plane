@@ -211,7 +211,7 @@ TEST_F(BlockSettingsServiceTest, GetReturnsTensorsAsArraysAndComplexAsParts) {
     EXPECT_EQ(result["correction"], nlohmann::json::parse(R"({"real": 0.5, "imag": 0.25})"));
 }
 
-// #34's receipt must remain visible beside values that the current serializer supports in full.
+// Status receipts remain visible beside tensor and complex settings.
 TEST_F(BlockSettingsServiceTest, LiveGetKeepsReceiptsBesideTensorAndComplexSettings) {
     const auto session = create_session(gr4cp::domain::SessionState::Running);
     runtime.settings[session.id]["radio0"] = gr::property_map{

@@ -162,7 +162,7 @@ Rules:
 - the target block is addressed by name, unique name or `name` setting, in that order
 - the settings calls read the session as `GET /sessions/{id}` does
 - an update needs a running session; stopped or errored sessions, and a run that is ending by itself, return conflict errors
-- a read of a session whose run has ended, by itself or by a stop, answers with the settings the run left; the runtime copies the final settings after the workers and stop hooks finish, then releases the block handles; the copy has no byte cap and lasts until the next prepare or delete. A capture failure is reported on reads of the affected block
+- a read of a session whose run has ended, by itself or by a stop, answers with the settings the run left; the runtime copies the final settings after the workers and stop hooks finish, then releases the block handles; the copy runs outside the service lock, has no byte cap and lasts until the next prepare or delete. A failed start or restart clears the execution ID, since the previous run’s values may have been discarded. A capture failure is reported on reads of the affected block
 - a read of a session that has not run, or whose run is stopping, returns a conflict error
 - a name that more than one block carries is refused with the candidates
 - stored GRC content is not inspected to fabricate values
