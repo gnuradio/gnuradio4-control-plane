@@ -318,3 +318,10 @@ The HTTP layer parses, delegates, serializes, and maps errors. The CLI is only a
 ## License
 
 This project is licensed under the MIT License. See [LICENSE](LICENSE) for the full text.
+
+### Native runtime build dependency
+
+Native graph lifecycle control requires Core's native Runtime adoption and cooperative drain APIs (Core #176,
+#223 and #224). Rebuild the Blocks libraries against the same Core installation so their plugin ABI matches.
+CI pins the Core dependency and rebuilds the exact Blocks revision recorded in the SDK image manifest into a
+separate prefix. The published `main` SDK alone does not yet provide these APIs.
