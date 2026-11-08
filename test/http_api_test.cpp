@@ -1873,6 +1873,7 @@ connections:
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         after = process_status();
     }
+    // Connections or idle pool threads counted in the baseline may have finished too.
     EXPECT_LE(after.threads, baseline.threads) << "a session left a thread running";
 
     ASSERT_FALSE(running_heaps.empty());

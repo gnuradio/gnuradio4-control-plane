@@ -1,5 +1,6 @@
 #pragma once
 
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -56,16 +57,19 @@ private:
         Idle,
         Starting,
         Running,
+        Observing,  // one request is reconciling this run outside the service lock
         Stopping,
         Failed,     // a start, a restart or a removal failed
         RunFailed,  // the run ended with an error or its stop failed, and a stop answers the session as it stands
     };
 
     InternalLifecyclePhase phase_for_locked(const domain::Session& session);
+    // Releases the service lock while observing the runtime, serializing requests for this session only.
     // Updates a running session from its run: the last error a block reported, and the run's end. An ended run goes
     // to `ended_runs`, which the caller destroys after releasing the mutex. A caller declares the vector before its
     // lock, or clears it after the lock is released.
-    domain::Session observe_locked(domain::Session session, std::vector<std::shared_ptr<void>>& ended_runs);
+    domain::Session observe_locked(domain::Session session, std::vector<std::shared_ptr<void>>& ended_runs,
+                                   std::unique_lock<std::mutex>& lock);
     // Reads the session as `get` does. Returns it when its run is in progress, and nothing otherwise.
     std::optional<domain::Session> running_session(const std::string& id);
     domain::Session load_or_throw(const std::string& id);
@@ -81,6 +85,7 @@ private:
     storage::SessionRepository& repository_;
     runtime::RuntimeManager& runtime_manager_;
     mutable std::mutex mutex_;
+    std::condition_variable observation_finished_;
     std::unordered_map<std::string, InternalLifecyclePhase> phases_;
 };
 

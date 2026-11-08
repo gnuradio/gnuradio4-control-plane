@@ -859,11 +859,14 @@ connections:
     service.remove(created.id);
 }
 
-// Final values outlive the graph, including stop-hook writes and values larger than the old capture cap.
-TEST_F(Gr4RuntimeManagerTest, FinalSettingsSurviveBlockDestructionWithoutTruncation) {
+// Final values outlive the graph, including stop-hook writes and a 5 MiB setting.
+TEST(TerminalSettingsRuntimeTest, FinalSettingsSurviveBlockDestructionWithoutTruncation) {
     gr4cp::test::register_test_blocks();
+    auto loader = std::make_shared<gr::PluginLoader>(gr::globalBlockRegistry(), gr::globalSchedulerRegistry(),
+                                                   std::vector<std::string>{});
+    gr4cp::runtime::Gr4RuntimeManager runtime(loader);
     gr4cp::storage::InMemorySessionRepository repository;
-    gr4cp::app::SessionService service(repository, runtime_);
+    gr4cp::app::SessionService service(repository, runtime);
     for (const bool finite : {false, true}) {
         const auto baseline = gr4cp::test::TerminalSettingsSource::alive();
         const auto created = service.create("terminal", std::format(R"(blocks:
@@ -872,7 +875,7 @@ TEST_F(Gr4RuntimeManagerTest, FinalSettingsSurviveBlockDestructionWithoutTruncat
     parameters:
       name: "terminal_alias"
       n_samples: {}
-  - id: "gr::blocks::basic::NullSink<float32>"
+  - id: "gr4cp::test::TerminalSettingsSink"
     parameters:
       name: "sink0"
 connections:
@@ -887,26 +890,31 @@ connections:
         EXPECT_EQ(ended.execution_id, started.execution_id);
         EXPECT_EQ(gr4cp::test::TerminalSettingsSource::alive(), baseline);
 
-        const auto settings = runtime_.get_block_settings(ended, "terminal_alias");
+        const auto settings = runtime.get_block_settings(ended, "terminal_alias");
+        ASSERT_TRUE(settings.contains("finalization"));
+        ASSERT_TRUE(settings.contains("payload"));
         const auto* finalization = settings.at("finalization").get_if<gr::property_map>();
         ASSERT_NE(finalization, nullptr);
+        ASSERT_TRUE(finalization->contains("unsigned"));
+        ASSERT_TRUE(finalization->contains("signed"));
+        ASSERT_TRUE(finalization->contains("unique_name"));
         EXPECT_EQ(finalization->at("unsigned").value_or(std::uint64_t{}), UINT64_MAX);
         EXPECT_EQ(finalization->at("signed").value_or(std::int64_t{}), INT64_MIN);
         const auto payload = settings.at("payload").value_or(std::string{});
         EXPECT_EQ(payload.size(), 5U * 1024U * 1024U);
         EXPECT_TRUE(std::ranges::all_of(payload, [](char value) { return value == 'x'; }));
-        const auto unique_name = settings.at("unique_name").value_or(std::string{});
+        const auto unique_name = finalization->at("unique_name").value_or(std::string{});
         ASSERT_FALSE(unique_name.empty());
-        EXPECT_EQ(runtime_.get_block_settings(ended, unique_name), settings);
-        EXPECT_THROW((void)runtime_.get_block_settings(ended, "missing"), gr4cp::runtime::BlockNotFoundError);
+        EXPECT_EQ(runtime.get_block_settings(ended, unique_name), settings);
+        EXPECT_THROW((void)runtime.get_block_settings(ended, "missing"), gr4cp::runtime::BlockNotFoundError);
         EXPECT_EQ(service.stop(created.id).execution_id, started.execution_id);
-        EXPECT_EQ(runtime_.get_block_settings(ended, "terminal_alias"), settings);
+        EXPECT_EQ(runtime.get_block_settings(ended, "terminal_alias"), settings);
         service.remove(created.id);
-        EXPECT_THROW((void)runtime_.get_block_settings(ended, "terminal_alias"), gr4cp::runtime::SessionNotRunningError);
+        EXPECT_THROW((void)runtime.get_block_settings(ended, "terminal_alias"), gr4cp::runtime::SessionNotRunningError);
     }
 }
 
-// Reconciliation copies final values under the service lock, but destroys blocks after releasing that lock.
+// Reconciliation captures final values and destroys blocks outside the service lock.
 TEST_F(Gr4RuntimeManagerTest, BlockTeardownOnCompletionHoldsUpNoOtherRequest) {
     gr4cp::test::register_test_blocks();
     gr4cp::storage::InMemorySessionRepository repository;

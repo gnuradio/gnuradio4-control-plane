@@ -277,7 +277,8 @@ struct TerminalSettingsSource : gr::Block<TerminalSettingsSource> {
     static std::int64_t alive() noexcept { return LiveInstances::count(); }
 
     void stop() {
-        finalization = {{"unsigned", std::numeric_limits<std::uint64_t>::max()},
+        finalization = {{"unique_name", std::string(this->unique_name)},
+                        {"unsigned", std::numeric_limits<std::uint64_t>::max()},
                         {"signed", std::numeric_limits<std::int64_t>::min()}};
         payload.assign(5 * 1024 * 1024, 'x');
         // Publish the completed stop-hook receipt to the settings cache BlockHandle::get() reads.
@@ -295,6 +296,13 @@ struct TerminalSettingsSource : gr::Block<TerminalSettingsSource> {
 private:
     LiveInstances live_;
     gr::Size_t produced_ = 0U;
+};
+
+// A terminal-settings test needs no installed block library to consume its samples.
+struct TerminalSettingsSink : gr::Block<TerminalSettingsSink> {
+    gr::PortIn<float> in;
+    GR_MAKE_REFLECTABLE(TerminalSettingsSink, in);
+    void processOne(float) const noexcept {}
 };
 
 // Produces zeros until the run stops, and counts its live instances.
@@ -349,6 +357,7 @@ inline void register_test_blocks() {
                registry.insert<StreamEndpointSink>("=gr4cp::test::StreamEndpointSink") &&
                registry.insert<BoundStreamSink>("=gr4cp::test::BoundStreamSink") &&
                registry.insert<TerminalSettingsSource>("=gr4cp::test::TerminalSettingsSource") &&
+               registry.insert<TerminalSettingsSink>("=gr4cp::test::TerminalSettingsSink") &&
                registry.insert<CountedSource>("=gr4cp::test::CountedSource") &&
                registry.insert<HeldTeardownSource>("=gr4cp::test::HeldTeardownSource") &&
                registry.insert<VectorSettingsSource>("=gr4cp::test::VectorSettingsSource");

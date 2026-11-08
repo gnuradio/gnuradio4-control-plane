@@ -93,7 +93,7 @@ domain::Session SessionService::create(const std::string& name,
 
 std::vector<domain::Session> SessionService::list() {
     std::vector<std::shared_ptr<void>> ended_runs;
-    std::lock_guard lock(mutex_);
+    std::unique_lock lock(mutex_);
     auto sessions = repository_.list();
     std::sort(sessions.begin(), sessions.end(), [](const domain::Session& left, const domain::Session& right) {
         if (left.created_at == right.created_at) {
@@ -101,24 +101,29 @@ std::vector<domain::Session> SessionService::list() {
         }
         return left.created_at < right.created_at;
     });
-    for (auto& session : sessions) {
-        session = observe_locked(std::move(session), ended_runs);
+    for (auto it = sessions.begin(); it != sessions.end();) {
+        try {
+            *it = observe_locked(std::move(*it), ended_runs, lock);
+            ++it;
+        } catch (const NotFoundError&) {
+            it = sessions.erase(it);  // a session removed while another observation released the lock
+        }
     }
     return sessions;
 }
 
 domain::Session SessionService::get(const std::string& id) {
     std::vector<std::shared_ptr<void>> ended_runs;
-    std::lock_guard lock(mutex_);
-    return observe_locked(load_or_throw(id), ended_runs);
+    std::unique_lock lock(mutex_);
+    return observe_locked(load_or_throw(id), ended_runs, lock);
 }
 
 domain::Session SessionService::start(const std::string& id) {
     auto session = domain::Session{};
     std::vector<std::shared_ptr<void>> ended_runs;
     {
-        std::lock_guard lock(mutex_);
-        session = observe_locked(load_or_throw(id), ended_runs);
+        std::unique_lock lock(mutex_);
+        session = observe_locked(load_or_throw(id), ended_runs, lock);
         const auto phase = phase_for_locked(session);
 
         if (session.state == domain::SessionState::Running || phase == InternalLifecyclePhase::Running) {
@@ -161,8 +166,8 @@ domain::Session SessionService::stop(const std::string& id) {
     auto session = domain::Session{};
     std::vector<std::shared_ptr<void>> ended_runs;
     {
-        std::lock_guard lock(mutex_);
-        session = observe_locked(load_or_throw(id), ended_runs);
+        std::unique_lock lock(mutex_);
+        session = observe_locked(load_or_throw(id), ended_runs, lock);
         const auto phase = phase_for_locked(session);
 
         if (phase == InternalLifecyclePhase::Stopping) {
@@ -209,8 +214,8 @@ domain::Session SessionService::restart(const std::string& id) {
     auto session = domain::Session{};
     std::vector<std::shared_ptr<void>> ended_runs;
     {
-        std::lock_guard lock(mutex_);
-        session = observe_locked(load_or_throw(id), ended_runs);
+        std::unique_lock lock(mutex_);
+        session = observe_locked(load_or_throw(id), ended_runs, lock);
         const auto phase = phase_for_locked(session);
 
         if (phase == InternalLifecyclePhase::Stopping) {
@@ -255,8 +260,8 @@ void SessionService::remove(const std::string& id) {
     auto session = domain::Session{};
     std::vector<std::shared_ptr<void>> ended_runs;
     {
-        std::lock_guard lock(mutex_);
-        session = observe_locked(load_or_throw(id), ended_runs);
+        std::unique_lock lock(mutex_);
+        session = observe_locked(load_or_throw(id), ended_runs, lock);
         const auto phase = phase_for_locked(session);
 
         if (phase == InternalLifecyclePhase::Stopping) {
@@ -352,25 +357,42 @@ runtime::WebSocketStreamRoute SessionService::resolve_websocket_stream(const std
 
 std::optional<domain::Session> SessionService::running_session(const std::string& id) {
     std::vector<std::shared_ptr<void>> ended_runs;
-    std::lock_guard lock(mutex_);
-    auto session = observe_locked(load_or_throw(id), ended_runs);
+    std::unique_lock lock(mutex_);
+    auto session = observe_locked(load_or_throw(id), ended_runs, lock);
     if (session.state != domain::SessionState::Running || phase_for_locked(session) != InternalLifecyclePhase::Running) {
         return std::nullopt;
     }
     return session;
 }
 
-domain::Session SessionService::observe_locked(domain::Session session, std::vector<std::shared_ptr<void>>& ended_runs) {
+domain::Session SessionService::observe_locked(domain::Session session, std::vector<std::shared_ptr<void>>& ended_runs,
+                                                std::unique_lock<std::mutex>& lock) {
+    observation_finished_.wait(lock, [&] { return phase_for_locked(session) != InternalLifecyclePhase::Observing; });
+    session = load_or_throw(session.id);
     if (session.state != domain::SessionState::Running || phase_for_locked(session) != InternalLifecyclePhase::Running) {
         return session;
     }
 
+    // Reserve this session before dropping the service lock. A concurrent start, stop, removal or read of this
+    // session waits on the condition variable, which releases mutex_ so other sessions remain available.
+    phases_[session.id] = InternalLifecyclePhase::Observing;
+    lock.unlock();
     runtime::RunObservation observation;
     try {
-        observation = runtime_manager_.observe(session);
-    } catch (const runtime::SessionNotRunningError&) {
-        observation.ended = true;  // the manager holds no run for the session
+        try {
+            observation = runtime_manager_.observe(session);
+        } catch (const runtime::SessionNotRunningError&) {
+            observation.ended = true;  // the manager holds no run for the session
+        }
+    } catch (...) {
+        lock.lock();
+        phases_[session.id] = InternalLifecyclePhase::Running;
+        observation_finished_.notify_all();
+        throw;
     }
+    lock.lock();
+    phases_[session.id] = InternalLifecyclePhase::Running;
+    observation_finished_.notify_all();
     if (observation.ended_run) {
         ended_runs.push_back(std::move(observation.ended_run));
     }
@@ -414,6 +436,9 @@ domain::Session SessionService::load_or_throw(const std::string& id) {
     session.state = domain::SessionState::Error;
     session.last_error = message;
     session.completion_reason = reason;
+    if (!reason.has_value()) {
+        session.execution_id.reset();  // a failed start/restart no longer has the previous run's results
+    }
     session.updated_at = now_utc();
     store_session_locked(session, phase);
     throw RuntimeError(message);

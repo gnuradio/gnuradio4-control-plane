@@ -3,6 +3,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <future>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -88,7 +89,11 @@ public:
         return {};
     }
 
-    gr4cp::runtime::RunObservation observe(const gr4cp::domain::Session&) override { return std::exchange(observation, {}); }
+    std::function<void()> on_observe;
+    gr4cp::runtime::RunObservation observe(const gr4cp::domain::Session&) override {
+        if (on_observe) on_observe();
+        return std::exchange(observation, {});
+    }
 
     void fail_on(std::string action, std::string message = "boom") {
         fail_action_ = std::move(action);
@@ -485,7 +490,7 @@ TEST_F(SessionServiceTest, EndedRunIsDestroyedAfterTheServiceReleasesItsLock) {
     EXPECT_TRUE(*other_read_answered);
 }
 
-TEST_F(SessionServiceTest, ExecutionIdentityChangesOnlyOnSuccessfulStartOrRestart) {
+TEST_F(SessionServiceTest, ExecutionIdentitySurvivesCompletionAndClearsOnFailedStart) {
     const auto created = service.create("identity", "graph");
     EXPECT_FALSE(created.execution_id.has_value());
     EXPECT_FALSE(service.stop(created.id).execution_id.has_value());
@@ -507,7 +512,62 @@ TEST_F(SessionServiceTest, ExecutionIdentityChangesOnlyOnSuccessfulStartOrRestar
     service.stop(created.id);
     runtime.fail_on("start", "start exploded");
     EXPECT_THROW(service.start(created.id), gr4cp::app::RuntimeError);
-    EXPECT_EQ(service.get(created.id).execution_id, third.execution_id);
+    EXPECT_FALSE(service.get(created.id).execution_id.has_value());
+}
+
+TEST_F(SessionServiceTest, FailedPrepareAndRestartClearThePreviousExecutionIdentity) {
+    for (const bool restart : {false, true}) {
+        const auto created = service.create("identity", "graph");
+        const auto started = service.start(created.id);
+        ASSERT_TRUE(started.execution_id.has_value());
+        service.stop(created.id);
+        runtime.fail_once_on("prepare", "prepare exploded");
+        if (restart) EXPECT_THROW(service.restart(created.id), gr4cp::app::RuntimeError);
+        else EXPECT_THROW(service.start(created.id), gr4cp::app::RuntimeError);
+        EXPECT_FALSE(service.get(created.id).execution_id.has_value());
+        const auto recovered = service.start(created.id);
+        EXPECT_TRUE(recovered.execution_id.has_value());
+        EXPECT_NE(recovered.execution_id, started.execution_id);
+        runtime.fail_once_on("start", "restart exploded");
+        EXPECT_THROW(service.restart(created.id), gr4cp::app::RuntimeError);
+        EXPECT_FALSE(service.get(created.id).execution_id.has_value());
+    }
+}
+
+TEST_F(SessionServiceTest, AnObservationFailureDoesNotLeaveTheSessionReserved) {
+    const auto created = service.create("capture", "graph");
+    const auto started = service.start(created.id);
+    runtime.on_observe = [] { throw std::runtime_error("observation failed"); };
+    EXPECT_THROW(service.get(created.id), std::runtime_error);
+    runtime.on_observe = {};
+    EXPECT_EQ(service.get(created.id).execution_id, started.execution_id);
+    EXPECT_EQ(service.stop(created.id).state, gr4cp::domain::SessionState::Stopped);
+}
+
+TEST_F(SessionServiceTest, CompletionCaptureAllowsOtherSessionsAndSerializesTheSameSession) {
+    const auto created = service.create("ended", "graph");
+    const auto other = service.create("other", "graph");
+    const auto started = service.start(created.id);
+    std::promise<void> entered, release;
+    auto proceed = release.get_future().share();
+    runtime.observation.ended = true;
+    runtime.on_observe = [&] { entered.set_value(); proceed.wait(); };
+    auto completion = std::async(std::launch::async, [&] { return service.get(created.id); });
+    const auto reached = entered.get_future().wait_for(std::chrono::seconds(2));
+    auto other_read = std::async(std::launch::async, [&] { return service.get(other.id); });
+    const auto answered = other_read.wait_for(std::chrono::seconds(1));
+    auto restart = std::async(std::launch::async, [&] { return service.restart(created.id); });
+    const auto restarted_while_held = restart.wait_for(std::chrono::milliseconds(20));
+    release.set_value();
+    EXPECT_EQ(reached, std::future_status::ready);
+    EXPECT_EQ(answered, std::future_status::ready);
+    EXPECT_EQ(restarted_while_held, std::future_status::timeout);
+    EXPECT_EQ(other_read.get().id, other.id);
+    EXPECT_EQ(completion.get().execution_id, started.execution_id);
+    const auto restarted = restart.get();
+    EXPECT_NE(restarted.execution_id, started.execution_id);
+    runtime.on_observe = {};
+    EXPECT_EQ(service.get(created.id).execution_id, restarted.execution_id);
 }
 
 TEST_F(SessionServiceTest, RuntimeFailureCausesErrorStateAndLastErrorToBeSet) {

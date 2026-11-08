@@ -390,6 +390,7 @@ if(NOT EMSCRIPTEN)
         test/session_stream_service_test.cpp
         test/block_catalog_service_test.cpp
         test/gr4_block_catalog_provider_test.cpp
+        test/final_settings_test.cpp
         test/gr4_runtime_manager_test.cpp
     )
 
