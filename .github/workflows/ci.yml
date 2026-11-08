@@ -75,6 +75,7 @@ jobs:
             # Keep this consumer build Debug while using the compatible SDK.
             blocks_sdk_tag: main-fedora-44-clang-release
             cxx: clang++
+            sdk_build_type: RelWithDebInfo
             cmake_build_type: Debug
             cxx_flags: -fsanitize=address -Wno-error=deprecated-declarations
             linker_flags: -fsanitize=address
@@ -99,6 +100,41 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The published main SDK predates native Runtime adoption (Core #224). Rebuild its Blocks revision against
+      # the required Core so headers, libraries and registered plugins all use the same ABI.
+      - name: Read Blocks SDK revision
+        id: sdk_revision
+        shell: bash
+        run: |
+          revision="$(sed -n 's/^git_sha=//p' /opt/gnuradio4/share/gnuradio4-blocks-sdk/manifest)"
+          [[ "${revision}" =~ ^[0-9a-f]{40}$ ]]
+          echo "blocks_ref=${revision}" >> "$GITHUB_OUTPUT"
+
+      - name: Check out Core native runtime dependency
+        uses: actions/checkout@v6
+        with:
+          repository: gnuradio/gnuradio4-core
+          ref: 841c63721302041101996eb7ca8dd17200e8e5e7
+          path: _ci/core
+          persist-credentials: false
+
+      - name: Check out matching Blocks source
+        uses: actions/checkout@v6
+        with:
+          repository: gnuradio/gnuradio4-blocks
+          ref: ${{ steps.sdk_revision.outputs.blocks_ref }}
+          path: _ci/blocks
+          persist-credentials: false
+
+      - name: Build matching Core and Blocks SDK
+        shell: bash
+        env:
+          CMAKE_WRAPPER: ${{ matrix.cmake_wrapper }}
+          SDK_BUILD_TYPE: ${{ matrix.sdk_build_type || matrix.cmake_build_type }}
+          SDK_CXX_FLAGS: ${{ matrix.cxx_flags }}
+          SDK_LINKER_FLAGS: ${{ matrix.linker_flags }}
+        run: bash .github/ci/build-native-runtime-sdk.sh _ci/core _ci/blocks ../build-sdk
+
       - name: Configure
         if: matrix.cmake_wrapper == null
         shell: bash
@@ -109,8 +145,8 @@ jobs:
             -S .
             -B ../build
             -DCMAKE_COLOR_DIAGNOSTICS=ON
-            -DCMAKE_PREFIX_PATH=/opt/gnuradio4
-            -DGR4CP_GNURADIO4_PREFIX=/opt/gnuradio4
+            "-DCMAKE_PREFIX_PATH=/opt/gr4cp-sdk;/opt/gnuradio4"
+            -DGR4CP_GNURADIO4_PREFIX=/opt/gr4cp-sdk
             -DCMAKE_BUILD_TYPE=${{ matrix.cmake_build_type }}
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
             -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
@@ -141,7 +177,7 @@ jobs:
         if: matrix.cmake_wrapper == 'emcmake'
         shell: bash
         env:
-          PKG_CONFIG_PATH: /opt/gnuradio4/lib/pkgconfig:/opt/gnuradio4/lib64/pkgconfig:/opt/gnuradio4/share/pkgconfig
+          PKG_CONFIG_PATH: /opt/gr4cp-sdk/lib/pkgconfig:/opt/gr4cp-sdk/lib64/pkgconfig:/opt/gr4cp-sdk/share/pkgconfig:/opt/gnuradio4/lib/pkgconfig:/opt/gnuradio4/lib64/pkgconfig:/opt/gnuradio4/share/pkgconfig
         run: |
           if ! command -v pkg-config >/dev/null; then
             apt-get update && apt-get install -y --no-install-recommends pkg-config
@@ -149,10 +185,10 @@ jobs:
           system_node="$(command -v node)"
           emcmake cmake -S gnuradio4-studio/blocks -B ../build-studio-blocks \
             -DCMAKE_COLOR_DIAGNOSTICS=ON \
-            -DCMAKE_PREFIX_PATH=/opt/gnuradio4 \
-            -DCMAKE_FIND_ROOT_PATH=/opt/gnuradio4 \
+            "-DCMAKE_PREFIX_PATH=/opt/gr4cp-sdk;/opt/gnuradio4" \
+            "-DCMAKE_FIND_ROOT_PATH=/opt/gr4cp-sdk;/opt/gnuradio4" \
             -DCMAKE_CROSSCOMPILING_EMULATOR="${system_node}" \
-            -DCMAKE_INSTALL_PREFIX=/opt/gnuradio4 \
+            -DCMAKE_INSTALL_PREFIX=/opt/gr4cp-sdk \
             -DCMAKE_BUILD_TYPE=${{ matrix.cmake_build_type }}
           cmake --build ../build-studio-blocks --parallel 4
           cmake --install ../build-studio-blocks
@@ -164,9 +200,9 @@ jobs:
           system_node="$(command -v node)"
           emcmake cmake -S . -B ../build \
             -DCMAKE_COLOR_DIAGNOSTICS=ON \
-            -DCMAKE_PREFIX_PATH=/opt/gnuradio4 \
-            -DCMAKE_FIND_ROOT_PATH=/opt/gnuradio4 \
-            -DGR4CP_GNURADIO4_PREFIX=/opt/gnuradio4 \
+            "-DCMAKE_PREFIX_PATH=/opt/gr4cp-sdk;/opt/gnuradio4" \
+            "-DCMAKE_FIND_ROOT_PATH=/opt/gr4cp-sdk;/opt/gnuradio4" \
+            -DGR4CP_GNURADIO4_PREFIX=/opt/gr4cp-sdk \
             -DCMAKE_CROSSCOMPILING_EMULATOR="${system_node}" \
             -DCMAKE_BUILD_TYPE=${{ matrix.cmake_build_type }} \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
