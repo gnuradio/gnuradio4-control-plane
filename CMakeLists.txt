@@ -269,6 +269,29 @@ if(NOT EMSCRIPTEN)
     add_dependencies(gr4cp_smoke_test gr4cp_server)
 
     include(GoogleTest)
+
+    if(WIN32 AND CMAKE_VERSION VERSION_LESS 3.29)
+        message(FATAL_ERROR "The control-plane tests need CMake 3.29 or newer on Windows, for TEST_LAUNCHER. "
+                            "Configure with -DENABLE_TESTING=OFF to build without them.")
+    endif()
+
+    # Windows has no RPATH, so a test only starts once the DLLs it links are on PATH. Launching it through `cmake -E env`
+    # covers gtest's discovery run during the build as well as the test runs, and copies no DLLs into the build tree.
+    # The test's own directory keeps the list from being empty, which `cmake -E env` would take for the command to run.
+    # Each prepend goes in front of the last, so the list is reversed to keep link order.
+    function(gr4cp_add_test_launcher target)
+        if(NOT WIN32)
+            return()
+        endif()
+        string(CONCAT _path_modifications
+            "$<LIST:TRANSFORM,"
+            "$<LIST:REVERSE,$<LIST:APPEND,$<TARGET_RUNTIME_DLL_DIRS:${target}>,$<TARGET_FILE_DIR:${target}>>>,"
+            [[REPLACE,^(.+)$,--modify$<SEMICOLON>PATH=path_list_prepend:\1>]]
+        )
+        set_target_properties(${target} PROPERTIES TEST_LAUNCHER "${CMAKE_COMMAND};-E;env;${_path_modifications};--")
+    endfunction()
+
+    gr4cp_add_test_launcher(gr4cp_smoke_test)
     gtest_discover_tests(gr4cp_smoke_test
         PROPERTIES
             ENVIRONMENT "GR4CP_SERVER_EXECUTABLE=$<TARGET_FILE:gr4cp_server>"
@@ -302,6 +325,7 @@ if(NOT EMSCRIPTEN)
     )
     add_dependencies(gr4cp_core_test gr4cp_broken_plugin)
 
+    gr4cp_add_test_launcher(gr4cp_core_test)
     gtest_discover_tests(gr4cp_core_test
         PROPERTIES
             ENVIRONMENT_MODIFICATION "GR4CP_BROKEN_PLUGIN_LIBRARY=set:$<TARGET_FILE:gr4cp_broken_plugin>"
@@ -320,6 +344,7 @@ if(NOT EMSCRIPTEN)
             Threads::Threads
     )
 
+    gr4cp_add_test_launcher(gr4cp_http_test)
     gtest_discover_tests(gr4cp_http_test)
 
     # Exercise the in-process dispatcher on native builds without an Emscripten SDK.
@@ -334,6 +359,7 @@ if(NOT EMSCRIPTEN)
             GTest::gtest_main
             Threads::Threads
     )
+    gr4cp_add_test_launcher(gr4cp_wasm_api_test)
     gtest_discover_tests(gr4cp_wasm_api_test)
 
     add_executable(gr4cp_cli_test
@@ -348,6 +374,7 @@ if(NOT EMSCRIPTEN)
             Threads::Threads
     )
 
+    gr4cp_add_test_launcher(gr4cp_cli_test)
     gtest_discover_tests(gr4cp_cli_test
         PROPERTIES
             ENVIRONMENT "GR4CP_CLI_EXECUTABLE=$<TARGET_FILE:gr4cp_cli_exec>"

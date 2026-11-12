@@ -25,7 +25,7 @@ The service is not a multi-tenant platform, graph editor, diagnostics system, pl
 
 ## Requirements
 
-- CMake 3.25 or newer
+- CMake 3.25 or newer (3.29 to run the tests on Windows)
 - C++23 compiler
 - GNU Radio 4 installation with CMake package files
 - Boost headers (Asio, Beast)
@@ -68,6 +68,22 @@ Built executables:
 
 - `build/gr4cp_server`
 - `build/gr4cp-cli`
+
+### Windows (MSVC)
+
+Build from a Visual Studio developer prompt, with the gnuradio4 and gr-deps prefixes built by the same MSVC toolchain:
+
+```bat
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="C:/path/to/gr4;C:/path/to/gr-deps"
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+Windows has no RPATH, so each test is launched through `cmake -E env` with the directories of the DLLs it links
+prepended to `PATH`; this also covers the gtest discovery run during the build. That only finds DLLs CMake knows as
+shared imported targets: a dependency a find module imports as an unknown library, as FindOpenSSL does, needs its
+`bin` directory on `PATH` already, which the gr-deps action arranges. To run the server or CLI from the build tree,
+put the gnuradio4 and gr-deps `bin` directories on `PATH` yourself.
 
 Install the runtime with:
 
