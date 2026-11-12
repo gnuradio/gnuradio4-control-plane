@@ -60,8 +60,8 @@ cmake -S . -B build -DCMAKE_PREFIX_PATH="/path/to/gr4/prefix;/path/to/gr-deps/pr
 Useful build options:
 
 - `GR4CP_ENABLE_GR4_CATALOG=ON`: require the GNU Radio 4-backed catalog provider, enabled by default
-- `GR4CP_EXTRA_PLUGIN_DIRECTORIES=<dir>[:<dir>...]`: plugin directories searched in addition to the installation's plugin directory
-- `GR4CP_PLUGIN_DIRECTORIES=<dir>[:<dir>...]`: plugin directories that replace the installation's plugin directory
+- `GR4CP_EXTRA_PLUGIN_DIRECTORIES=<dir>[:<dir>...]`: plugin directories searched in addition to the installation's plugin directory; on Windows, separate them with `;` as in `PATH`
+- `GR4CP_PLUGIN_DIRECTORIES=<dir>[:<dir>...]`: plugin directories that replace the installation's plugin directory; on Windows, separate them with `;`
 - `USE_CCACHE=ON`: use ccache when available, enabled by default
 
 Built executables:

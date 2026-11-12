@@ -13,8 +13,8 @@ option(ENABLE_TESTING "Build control-plane tests" ON)
 
 option(GR4CP_ENABLE_GR4_CATALOG "Enable the required GNU Radio 4-backed block catalog provider" ON)
 
-set(GR4CP_EXTRA_PLUGIN_DIRECTORIES "" CACHE STRING "Colon-separated plugin directories searched last")
-set(GR4CP_PLUGIN_DIRECTORIES "" CACHE STRING "Colon-separated plugin directories replacing the installation's plugin directory")
+set(GR4CP_EXTRA_PLUGIN_DIRECTORIES "" CACHE STRING "Plugin directories searched last, separated as PATH is (':', or ';' on Windows)")
+set(GR4CP_PLUGIN_DIRECTORIES "" CACHE STRING "Plugin directories replacing the installation's plugin directory, separated as PATH is (':', or ';' on Windows)")
 
 # Use ccache if found and enabled
 find_program(CCACHE_PROGRAM ccache)
@@ -85,6 +85,20 @@ else()
 endif()
 
 if(GR4CP_HAVE_GNURADIO4)
+    # The two options are native path lists. Converting one splits it on the platform's separator and turns any
+    # backslash into a forward slash, which a C string literal would otherwise read as an escape ("C:\new" -> "C:<LF>ew").
+    # Windows separates the list with ';', CMake's list separator too, so the directories are joined with an escaped ';',
+    # which survives into the compile definition only inside one quoted argument.
+    if(WIN32)
+        set(_gr4cp_path_list_separator "\\;")
+    else()
+        set(_gr4cp_path_list_separator ":")
+    endif()
+    foreach(_gr4cp_option IN ITEMS GR4CP_PLUGIN_DIRECTORIES GR4CP_EXTRA_PLUGIN_DIRECTORIES)
+        cmake_path(CONVERT "${${_gr4cp_option}}" TO_CMAKE_PATH_LIST _gr4cp_directories)
+        list(JOIN _gr4cp_directories "${_gr4cp_path_list_separator}" _gr4cp_${_gr4cp_option})
+    endforeach()
+
     target_sources(gr4cp_core
         PRIVATE
             src/catalog/gr4_block_catalog_provider.cpp
@@ -94,8 +108,8 @@ if(GR4CP_HAVE_GNURADIO4)
         PUBLIC
             GR4CP_HAVE_GNURADIO4
         PRIVATE
-            GR4CP_PLUGIN_DIRECTORIES="${GR4CP_PLUGIN_DIRECTORIES}"
-            GR4CP_EXTRA_PLUGIN_DIRECTORIES="${GR4CP_EXTRA_PLUGIN_DIRECTORIES}"
+            "GR4CP_PLUGIN_DIRECTORIES=\"${_gr4cp_GR4CP_PLUGIN_DIRECTORIES}\""
+            "GR4CP_EXTRA_PLUGIN_DIRECTORIES=\"${_gr4cp_GR4CP_EXTRA_PLUGIN_DIRECTORIES}\""
     )
     set(GR4CP_GNURADIO4_TARGETS
         gnuradio4::gnuradio-core
@@ -298,7 +312,7 @@ if(NOT EMSCRIPTEN)
 
     target_compile_definitions(gr4cp_core_test
         PRIVATE
-            GR4CP_PLUGIN_DIRECTORIES="${GR4CP_PLUGIN_DIRECTORIES}"
+            "GR4CP_PLUGIN_DIRECTORIES=\"${_gr4cp_GR4CP_PLUGIN_DIRECTORIES}\""
     )
     add_dependencies(gr4cp_core_test gr4cp_broken_plugin)
 
