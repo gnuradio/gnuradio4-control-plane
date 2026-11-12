@@ -4,6 +4,7 @@
 #include "gr4cp/domain/session_stream.hpp"
 #include "gr4cp/runtime/block_settings.hpp"
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -38,6 +39,18 @@ struct RunObservation {
 class RuntimeManager {
 public:
     virtual ~RuntimeManager() = default;
+    virtual void pause(const domain::Session &) { throw std::logic_error("pause unsupported"); }
+    virtual void resume(const domain::Session &) { throw std::logic_error("resume unsupported"); }
+    virtual void restart(const domain::Session &session) {
+        auto next = session;
+        if (next.state == domain::SessionState::Running || next.state == domain::SessionState::Paused) {
+            stop(next);
+            next.state = domain::SessionState::Stopped;
+        }
+        destroy(next);
+        prepare(next);
+        start(next);
+    }
 
     virtual void prepare(const domain::Session& session) = 0;
     virtual void start(const domain::Session& session) = 0;

@@ -13,6 +13,8 @@ std::string to_string(const SessionState state) {
         return "stopped";
     case SessionState::Running:
         return "running";
+    case SessionState::Paused:
+        return "paused";
     case SessionState::Error:
         return "error";
     }

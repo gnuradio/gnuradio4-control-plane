@@ -451,6 +451,26 @@ void register_routes(httplib::Server& server,
                     });
                 });
 
+    for (bool paused : {true, false}) {
+        server.Post(paused ? R"(/sessions/([A-Za-z0-9_]+)/pause)" : R"(/sessions/([A-Za-z0-9_]+)/resume)",
+                    [&session_service, paused](const httplib::Request &request, httplib::Response &response) {
+                        execute(response, [&]() {
+                            std::string identity;
+                            try {
+                                identity = nlohmann::json::parse(request.body).at("execution_id").get<std::string>();
+                                if (identity.empty())
+                                    throw std::invalid_argument("empty execution identity");
+                            } catch (const std::exception &) {
+                                throw gr4cp::app::ValidationError("execution_id must be a nonempty string");
+                            }
+                            set_json_response(
+                                response,
+                                session_to_json(paused ? session_service.pause(request.matches[1].str(), identity)
+                                                       : session_service.resume(request.matches[1].str(), identity)));
+                        });
+                    });
+    }
+
     server.Post(R"(/sessions/([A-Za-z0-9_]+)/stop)",
                 [&session_service](const httplib::Request& request, httplib::Response& response) {
                     execute(response, [&]() {
