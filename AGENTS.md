@@ -15,14 +15,18 @@
   - `GET /sessions/{id}/blocks/{unique_name}/settings`
   - `GET /blocks`
   - `GET /blocks/{id}`
+  - `GET /schedulers`
+  - `GET /schedulers/{id}`
 - No other product endpoints are allowed beyond temporary bootstrap `GET /healthz`.
-- Current scope allows exactly those 11 product endpoints plus temporary `GET /healthz`, and nothing else.
+- Current scope allows exactly those 13 product endpoints plus temporary `GET /healthz`, and nothing else.
+- The optional gRPC API (`proto/gr4cp/v1/control_plane.proto`) is a second transport for the existing operations. It must not gain an RPC that has no REST counterpart.
 - No platform features: no multi-tenant control plane, no orchestration layer, no observability surface, no diagnostics stream, or history APIs. There is no public plugin management surface.
 
 ## Architecture Rules
 
 - Keep the HTTP layer thin. It should translate HTTP to service calls and nothing else.
 - Keep the HTTP layer thin even after product endpoints exist: parse, delegate, serialize, and map errors only.
+- Keep the gRPC layer as thin as the HTTP layer: convert, delegate, and map errors only.
 - Keep the CLI thin as well: it is only a client of the existing REST API and must not duplicate `SessionService` lifecycle logic.
 - `SessionService` is the core application boundary and owns lifecycle and runtime error semantics.
 - Keep the block catalog separate from session lifecycle logic. It is a read-only metadata feature for future gr4-studio integration.

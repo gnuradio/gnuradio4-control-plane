@@ -21,7 +21,7 @@ The mandatory layers are:
 - `storage`: repository interfaces and persistence implementations
 - `runtime`: GNU Radio 4 execution boundary
 - `app`: application services and lifecycle semantics
-- `api`: HTTP transport adapter
+- `api`: HTTP transport adapter, and the optional gRPC transport adapter
 
 Supporting namespaces:
 
@@ -68,6 +68,8 @@ Business rules belong in `SessionService` or the specific application service re
 
 ## HTTP API
 
+`docs/api.md` lists every route with its gRPC form.
+
 The public product API is limited to these endpoints:
 
 - `POST /sessions`
@@ -81,6 +83,8 @@ The public product API is limited to these endpoints:
 - `GET /sessions/{id}/blocks/{unique_name}/settings`
 - `GET /blocks`
 - `GET /blocks/{id}`
+- `GET /schedulers`
+- `GET /schedulers/{id}`
 
 `GET /healthz` is temporary bootstrap infrastructure and is not part of the product API.
 
@@ -94,6 +98,19 @@ The HTTP layer stays thin:
 - map application errors to HTTP responses
 
 It must not contain lifecycle state machines, runtime orchestration, catalog curation, settings conversion rules, or compatibility policy.
+
+## gRPC API
+
+The gRPC adapter is a second transport over the same application services, built with `GR4CP_ENABLE_GRPC=ON` and served when `GR4CP_GRPC_PORT` is set. It lives in the `gr4cp_grpc` library, so `gr4cp_core` and the WASM module do not depend on gRPC or protobuf.
+
+- the contract is `proto/gr4cp/v1/control_plane.proto`; each RPC maps to one REST endpoint
+- handlers convert the request, call one service and convert the result, as the HTTP routes do
+- application errors map to `INVALID_ARGUMENT`, `NOT_FOUND`, `FAILED_PRECONDITION` and `INTERNAL`, with the REST error code in the trailing metadata key `gr4cp-error-code`
+- a call that was cancelled, or whose deadline passed, before the server reached it does no work, and `ListSessions` stops between sessions; a call already in an application service completes, since the services do not abandon a lifecycle step midway, as a REST request that outlives its client does
+- settings use the contract's `Value`, which keeps 64-bit integers exact; a read converts the block's `property_map` directly, and an update goes through the JSON form the settings service validates. A `Value` with no kind set is `INVALID_ARGUMENT`; an empty `enum_labels` map is the REST form's absent object
+- sessions list their stream descriptors; stream data stays on the REST paths
+- `ServerService.GetHealth` answers as `GET /healthz` does, with the server instance ID; the standard `grpc.health.v1.Health` service is served as well, for tools that probe it
+- the listener has no transport security, as the REST listener has none
 
 ## CLI
 

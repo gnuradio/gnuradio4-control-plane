@@ -77,6 +77,7 @@ jobs:
             cxx_flags: -Wno-error=null-dereference
             linker_flags: ""
             asan_options: ""
+            grpc: true
           - name: Ubuntu 26.04 | GCC | Debug
             blocks_sdk_tag: main-ubuntu-26.04-gcc-debug
             cxx: g++
@@ -84,6 +85,7 @@ jobs:
             cxx_flags: -Wno-error=null-dereference
             linker_flags: ""
             asan_options: ""
+            grpc: true
           - name: Ubuntu 24.04 | Clang 20 | Release
             blocks_sdk_tag: main-ubuntu-24.04-clang20-release
             cxx: clang++-20
@@ -117,7 +119,8 @@ jobs:
             linker_flags: ""
             asan_options: ""
     container:
-      image: ghcr.io/${{ github.repository_owner }}/gnuradio4-blocks-sdk:${{ matrix.blocks_sdk_tag }}
+      # The SDK images are published by the gnuradio organisation only, so forks pull them from there too.
+      image: ghcr.io/gnuradio/gnuradio4-blocks-sdk:${{ matrix.blocks_sdk_tag }}
 
     env:
       CXX: ${{ matrix.cxx }}
@@ -127,6 +130,13 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
+      - name: Install the gRPC toolchain
+        if: matrix.grpc
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            libgrpc++-dev libprotobuf-dev pkg-config protobuf-compiler protobuf-compiler-grpc
 
       - name: Configure
         if: matrix.cmake_wrapper == null
@@ -152,6 +162,9 @@ jobs:
               "-DCMAKE_EXE_LINKER_FLAGS=${{ matrix.linker_flags }}"
               "-DCMAKE_SHARED_LINKER_FLAGS=${{ matrix.linker_flags }}"
             )
+          fi
+          if [[ "${{ matrix.grpc }}" == "true" ]]; then
+            cmake_args+=(-DGR4CP_ENABLE_GRPC=ON)
           fi
           if [[ -n "${CMAKE_OPTIONS}" ]]; then
             read -r -a overrides <<< "${CMAKE_OPTIONS}"
