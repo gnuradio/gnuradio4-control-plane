@@ -19,7 +19,10 @@
 #include <utility>
 #include <vector>
 
+#if !defined(_WIN32)
+// Boost.Asio declares shutdown() through <winsock2.h> on Windows
 #include <sys/socket.h>
+#endif
 
 #include <boost/asio.hpp>
 #include <boost/beast/core.hpp>
@@ -992,7 +995,11 @@ private:
     void shut_down_reading_sockets() {
         std::lock_guard lock(reading_mutex_);
         for (const auto handle : reading_sockets_) {
+#if defined(_WIN32)
+            ::shutdown(handle, SD_BOTH);
+#else
             ::shutdown(handle, SHUT_RDWR);
+#endif
         }
     }
 
