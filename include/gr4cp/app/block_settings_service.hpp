@@ -30,6 +30,8 @@ public:
                                      const Json& patch,
                                      runtime::BlockSettingsMode mode);
     Json get(const std::string& session_id, const std::string& block_unique_name);
+    // Reads the settings `get` reads, with the types the block holds them in.
+    gr::property_map get_properties(const std::string& session_id, const std::string& block_unique_name);
 
 private:
     domain::Session load_running_session_or_throw(const std::string& session_id);

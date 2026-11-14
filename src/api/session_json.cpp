@@ -58,6 +58,18 @@ const std::string& server_instance_id() {
     return identity;
 }
 
+const std::string& server_version() {
+    // Build version from CMake's PROJECT_VERSION. The build defines
+    // GR4CP_VERSION as a quoted string; fall back when built elsewhere.
+    static const std::string version =
+#if defined(GR4CP_VERSION)
+        GR4CP_VERSION;
+#else
+        "0.0.0-unknown";
+#endif
+    return version;
+}
+
 Json session_to_json(const domain::Session& session, const std::optional<domain::StreamRuntimePlan>& stream_plan) {
     auto body = Json{
         {"id", session.id},

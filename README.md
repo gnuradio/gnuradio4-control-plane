@@ -19,8 +19,10 @@ The service is not a multi-tenant platform, graph editor, diagnostics system, pl
 - `include/gr4cp/runtime`, `src/runtime`: GNU Radio 4 runtime integration plus test stub runtime
 - `include/gr4cp/app`, `src/app`: application services
 - `include/gr4cp/api`, `src/api`: HTTP adapter
+- `proto`: gRPC contract, served by the optional gRPC adapter in `src/api`
 - `include/gr4cp/cli`, `src/cli`: REST API client CLI
 - `test`: unit, HTTP, CLI, and smoke tests
+- `docs/api.md`: table of every REST route and gRPC RPC
 - `docs/design.md`: architecture notes
 
 ## Requirements
@@ -59,6 +61,7 @@ Useful build options:
 - `GR4CP_SUPPRESS_IMPORTED_WERROR=ON`: strip inherited `-Werror` from imported GNU Radio 4 targets when needed
 - `GR4CP_EXTRA_PLUGIN_DIRECTORIES=<dir>[:<dir>...]`: plugin directories searched in addition to the installation's plugin directory
 - `GR4CP_PLUGIN_DIRECTORIES=<dir>[:<dir>...]`: plugin directories that replace the installation's plugin directory
+- `GR4CP_ENABLE_GRPC=ON`: build the gRPC API next to the REST API, off by default; needs gRPC C++, protobuf, `protoc` and `grpc_cpp_plugin` (`libgrpc++-dev protobuf-compiler-grpc` on Ubuntu)
 - `USE_CCACHE=ON`: use ccache when available, enabled by default
 
 Built executables:
@@ -108,6 +111,33 @@ Temporary health check:
 curl http://127.0.0.1:8080/healthz
 ```
 
+## API Routes
+
+`docs/api.md` lists every REST route and gRPC RPC in one table, with requests, responses and error codes.
+
+## gRPC API
+
+A server built with `GR4CP_ENABLE_GRPC=ON` also serves the API over gRPC when `GR4CP_GRPC_PORT` is set:
+
+```bash
+GR4CP_GRPC_PORT=50051 ./build/gr4cp_server
+```
+
+The contract is `proto/gr4cp/v1/control_plane.proto`. Each RPC maps to one REST endpoint and calls the same application service, so both APIs see the same sessions. The gRPC API listens on the REST API's host, without transport security, and `GR4CP_GRPC_PORT=0` selects a free port that the server prints and writes to the file `GR4CP_GRPC_PORT_FILE` names. The file is written once the gRPC API is listening, and is only used when `GR4CP_GRPC_PORT=0`. The standard `grpc.health.v1.Health` service is served as well, for tools that probe it.
+
+- `ServerService`: `GetHealth`, the form of `GET /healthz`, with the same `ok` and `server_instance_id`; `GetVersion`, the form of `GET /version`, with the same `version` and `server_instance_id`
+- `SessionService`: `CreateSession`, `ListSessions`, `GetSession`, `DeleteSession`, `StartSession`, `StopSession`, `RestartSession`
+- `BlockSettingsService`: `GetBlockSettings`, `UpdateBlockSettings`
+- `CatalogService`: `ListBlocks`, `GetBlock`, `ListSchedulers`, `GetScheduler`
+
+Errors map to `INVALID_ARGUMENT` (REST 400), `NOT_FOUND` (404), `FAILED_PRECONDITION` (409) and `INTERNAL` (500). A failed call also carries the REST error code, such as `runtime_error`, in the trailing metadata key `gr4cp-error-code`.
+
+Every call honours the client's deadline and cancellation: the client gets `DEADLINE_EXCEEDED` or `CANCELLED` at once, and a call the server has not begun does no work. A call that is already running in the server completes there. After a deadline on a call that changes a session, read the session to learn its state.
+
+The server keeps gRPC's default limit of 4 MiB for a request message. A `CreateSession` whose flowgraph is larger fails with `RESOURCE_EXHAUSTED`, without a `gr4cp-error-code`; send such a flowgraph through `POST /sessions`. A client applies its own limit to each response, also 4 MiB by default, and can raise it if `ListBlocks` outgrows it.
+
+Settings are typed: a 64-bit integer reads as an integer, where the REST API returns a decimal string. A complex value is a map of `real` and `imag`, as in REST. A settings `Value` with no kind set is `INVALID_ARGUMENT`; explicit `null_value` is the null setting. A block parameter with no enum labels returns an empty `enum_labels` map, where REST omits the object. Stream data is not served over gRPC. A session lists its streams, and their data is read from the REST paths.
+
 ## HTTP API
 
 The public product API is limited to these endpoints:
@@ -123,8 +153,11 @@ The public product API is limited to these endpoints:
 - `GET /sessions/{id}/blocks/{unique_name}/settings`
 - `GET /blocks`
 - `GET /blocks/{id}`
+- `GET /schedulers`
+- `GET /schedulers/{id}`
 
-`GET /healthz` is a temporary bootstrap endpoint and is not part of the product API.
+`GET /healthz` and `GET /version` are temporary bootstrap endpoints and are not part of the product API.
+`GET /version` returns the build version from CMake's `PROJECT_VERSION` with the `server_instance_id`.
 HTTP and WebAssembly health and session responses include `server_instance_id`, stable
 for the server process or loaded WebAssembly module and regenerated on restart.
 Clients must not reuse ownership across instances.

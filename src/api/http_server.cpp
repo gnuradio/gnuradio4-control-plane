@@ -346,6 +346,11 @@ void register_routes(httplib::Server& server,
         set_json_response(response, Json{{"ok", true}, {"server_instance_id", server_instance_id()}});
     });
 
+    server.Get("/version", [](const httplib::Request&, httplib::Response& response) {
+        set_json_response(response,
+                          Json{{"version", server_version()}, {"server_instance_id", server_instance_id()}});
+    });
+
     server.Get("/blocks", [&block_catalog_service](const httplib::Request&, httplib::Response& response) {
         execute(response, [&]() {
             set_json_response(response, blocks_to_json(block_catalog_service.list()));

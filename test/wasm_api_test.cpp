@@ -63,6 +63,15 @@ TEST_F(WasmApiTest, HealthIdentityIsAStableUuidAcrossDispatchers) {
     EXPECT_EQ(another.dispatch("GET", "/healthz", "").body, health.body);
 }
 
+TEST_F(WasmApiTest, VersionSharesHealthIdentityAndReportsAVersion) {
+    const auto health = Json::parse(api.dispatch("GET", "/healthz", "").body);
+    const auto versioned = api.dispatch("GET", "/version", "");
+    ASSERT_EQ(versioned.status, 200);
+    const auto body = Json::parse(versioned.body);
+    EXPECT_FALSE(body.at("version").get<std::string>().empty());
+    EXPECT_EQ(body.at("server_instance_id"), health.at("server_instance_id"));
+}
+
 TEST_F(WasmApiTest, HealthAndEverySessionResponseShareHttpIdentityAndSerialization) {
     const auto port = http_server.bind_to_any_port("127.0.0.1");
     ASSERT_GT(port, 0);

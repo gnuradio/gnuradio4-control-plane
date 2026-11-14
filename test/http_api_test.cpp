@@ -2253,6 +2253,18 @@ TEST_F(HttpApiTest, GetSessionsWhenEmpty) {
     EXPECT_EQ(parse_json(response), nlohmann::json::array());
 }
 
+TEST_F(HttpApiTest, GetVersionReportsAVersionAndSharesHealthIdentity) {
+    const auto health = parse_json(client->Get("/healthz"));
+    const auto response = client->Get("/version");
+
+    ASSERT_TRUE(response);
+    EXPECT_EQ(response->status, 200);
+    expect_json_content_type(response);
+    const auto body = parse_json(response);
+    EXPECT_FALSE(body.at("version").get<std::string>().empty());
+    EXPECT_EQ(body.at("server_instance_id"), health.at("server_instance_id"));
+}
+
 TEST_F(HttpApiTest, GetSessionsAfterCreate) {
     const auto created = client->Post("/sessions", R"({"name":"demo","grc":"flowgraph"})", "application/json");
     ASSERT_TRUE(created);

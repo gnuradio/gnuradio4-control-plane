@@ -12,6 +12,7 @@ option(USE_CCACHE "Use ccache if available" ON)
 option(ENABLE_TESTING "Build control-plane tests" ON)
 
 option(GR4CP_ENABLE_GR4_CATALOG "Enable the required GNU Radio 4-backed block catalog provider" ON)
+option(GR4CP_ENABLE_GRPC "Build the gRPC transport next to the REST API; needs gRPC C++, protobuf and grpc_cpp_plugin" OFF)
 option(GR4CP_SUPPRESS_IMPORTED_WERROR "Remove -Werror inherited from imported dependency targets" OFF)
 
 set(_gr4cp_default_gnuradio4_prefix "")
@@ -213,6 +214,12 @@ target_include_directories(gr4cp_core
         include
 )
 
+# Single source of truth for the served version: CMake's PROJECT_VERSION.
+target_compile_definitions(gr4cp_core
+    PRIVATE
+        GR4CP_VERSION="${PROJECT_VERSION}"
+)
+
 if(NOT EMSCRIPTEN)
     target_link_libraries(gr4cp_core
         PUBLIC
@@ -273,6 +280,57 @@ if(NOT EMSCRIPTEN)
         PRIVATE
             gr4cp_core
     )
+
+    if(GR4CP_ENABLE_GRPC)
+        pkg_check_modules(GR4CP_GRPC REQUIRED IMPORTED_TARGET grpc++ protobuf)
+        find_program(GR4CP_PROTOC protoc REQUIRED)
+        find_program(GR4CP_GRPC_CPP_PLUGIN grpc_cpp_plugin REQUIRED)
+
+        set(_gr4cp_proto_root "${CMAKE_CURRENT_SOURCE_DIR}/proto")
+        set(_gr4cp_proto_file "${_gr4cp_proto_root}/gr4cp/v1/control_plane.proto")
+        set(_gr4cp_proto_out "${CMAKE_CURRENT_BINARY_DIR}/generated-proto")
+        set(_gr4cp_proto_sources
+            "${_gr4cp_proto_out}/gr4cp/v1/control_plane.pb.cc"
+            "${_gr4cp_proto_out}/gr4cp/v1/control_plane.grpc.pb.cc"
+        )
+        file(MAKE_DIRECTORY "${_gr4cp_proto_out}")
+        add_custom_command(
+            OUTPUT
+                ${_gr4cp_proto_sources}
+                "${_gr4cp_proto_out}/gr4cp/v1/control_plane.pb.h"
+                "${_gr4cp_proto_out}/gr4cp/v1/control_plane.grpc.pb.h"
+            COMMAND "${GR4CP_PROTOC}"
+                "--proto_path=${_gr4cp_proto_root}"
+                "--cpp_out=${_gr4cp_proto_out}"
+                "--grpc_out=${_gr4cp_proto_out}"
+                "--plugin=protoc-gen-grpc=${GR4CP_GRPC_CPP_PLUGIN}"
+                "${_gr4cp_proto_file}"
+            DEPENDS "${_gr4cp_proto_file}"
+            VERBATIM
+        )
+
+        # The generated sources build apart from gr4cp_core, whose GNU Radio 4 targets pass on warnings as errors.
+        add_library(gr4cp_proto OBJECT ${_gr4cp_proto_sources})
+        set_target_properties(gr4cp_proto PROPERTIES POSITION_INDEPENDENT_CODE ON)
+        target_include_directories(gr4cp_proto SYSTEM PUBLIC "${_gr4cp_proto_out}")
+        target_link_libraries(gr4cp_proto PUBLIC PkgConfig::GR4CP_GRPC)
+        target_compile_options(gr4cp_proto PRIVATE -w)
+
+        add_library(gr4cp_grpc
+            src/api/grpc_server.cpp
+            $<TARGET_OBJECTS:gr4cp_proto>
+        )
+        add_dependencies(gr4cp_grpc gr4cp_proto)
+        target_include_directories(gr4cp_grpc SYSTEM PUBLIC "$<BUILD_INTERFACE:${_gr4cp_proto_out}>")
+        target_link_libraries(gr4cp_grpc
+            PUBLIC
+                gr4cp_core
+                PkgConfig::GR4CP_GRPC
+        )
+
+        target_link_libraries(gr4cp_server PRIVATE gr4cp_grpc)
+        target_compile_definitions(gr4cp_server PRIVATE GR4CP_HAVE_GRPC)
+    endif()
 else()
     # gnuradio4-studio loads this module and calls Module.handleRequest() directly; there is no
     # listening socket, so src/main.cpp (which drives HttpServer) has no WASM counterpart.
@@ -344,6 +402,11 @@ if(NOT EMSCRIPTEN)
         set_target_properties(gr4cp_core gr4cp_cli PROPERTIES
             INSTALL_RPATH "${_gr4cp_library_install_rpath}"
         )
+        if(TARGET gr4cp_grpc)
+            set_target_properties(gr4cp_grpc PROPERTIES
+                INSTALL_RPATH "${_gr4cp_library_install_rpath}"
+            )
+        endif()
     endif()
 
     target_link_libraries(gr4cp_cli_exec
@@ -458,6 +521,41 @@ if(NOT EMSCRIPTEN)
             ENVIRONMENT "GR4CP_CLI_EXECUTABLE=$<TARGET_FILE:gr4cp_cli_exec>"
     )
 
+    if(TARGET gr4cp_grpc)
+        add_executable(gr4cp_grpc_test
+            test/grpc_api_test.cpp
+        )
+
+        target_link_libraries(gr4cp_grpc_test
+            PRIVATE
+                gr4cp_grpc
+                GTest::gtest_main
+                Threads::Threads
+        )
+
+        gtest_discover_tests(gr4cp_grpc_test)
+
+        if(GR4CP_HAVE_GNURADIO4)
+            add_executable(gr4cp_grpc_smoke_test
+                test/grpc_server_smoke_test.cpp
+            )
+
+            target_link_libraries(gr4cp_grpc_smoke_test
+                PRIVATE
+                    gr4cp_grpc
+                    GTest::gtest_main
+                    Threads::Threads
+            )
+
+            add_dependencies(gr4cp_grpc_smoke_test gr4cp_server)
+
+            gtest_discover_tests(gr4cp_grpc_smoke_test
+                PROPERTIES
+                    ENVIRONMENT "GR4CP_SERVER_EXECUTABLE=$<TARGET_FILE:gr4cp_server>"
+            )
+        endif()
+    endif()
+
 endif()
 endif()
 
@@ -466,6 +564,18 @@ if(NOT EMSCRIPTEN)
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    )
+endif()
+
+if(TARGET gr4cp_grpc)
+    install(TARGETS gr4cp_grpc
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    )
+    install(DIRECTORY proto/
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/gr4cp/proto
+        FILES_MATCHING PATTERN "*.proto"
     )
 endif()
 
