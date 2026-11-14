@@ -17,8 +17,8 @@
   - `GET /blocks/{id}`
   - `GET /schedulers`
   - `GET /schedulers/{id}`
-- No other product endpoints are allowed beyond temporary bootstrap `GET /healthz`.
-- Current scope allows exactly those 13 product endpoints plus temporary `GET /healthz`, and nothing else.
+- No other product endpoints are allowed beyond temporary bootstrap `GET /healthz` and `GET /version`.
+- Current scope allows exactly those 13 product endpoints plus temporary `GET /healthz` and `GET /version`, and nothing else.
 - The optional gRPC API (`proto/gr4cp/v1/control_plane.proto`) is a second transport for the existing operations. It must not gain an RPC that has no REST counterpart.
 - No platform features: no multi-tenant control plane, no orchestration layer, no observability surface, no diagnostics stream, or history APIs. There is no public plugin management surface.
 

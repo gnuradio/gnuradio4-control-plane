@@ -214,6 +214,12 @@ target_include_directories(gr4cp_core
         include
 )
 
+# Single source of truth for the served version: CMake's PROJECT_VERSION.
+target_compile_definitions(gr4cp_core
+    PRIVATE
+        GR4CP_VERSION="${PROJECT_VERSION}"
+)
+
 if(NOT EMSCRIPTEN)
     target_link_libraries(gr4cp_core
         PUBLIC

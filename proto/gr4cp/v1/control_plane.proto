@@ -3,6 +3,7 @@ syntax = "proto3";
 package gr4cp.v1;
 
 import "google/protobuf/empty.proto";
+import "google/protobuf/struct.proto";
 import "google/protobuf/timestamp.proto";
 
 // The gRPC form of the control plane's REST API. Each RPC maps to one REST endpoint and calls the same
@@ -26,9 +27,10 @@ import "google/protobuf/timestamp.proto";
 // larger fails with RESOURCE_EXHAUSTED and carries no `gr4cp-error-code`. A client applies its own limit, also
 // 4 MiB by default, to each response; raise it if ListBlocks outgrows it.
 
-// GET /healthz.
+// GET /healthz and GET /version.
 service ServerService {
   rpc GetHealth(GetHealthRequest) returns (GetHealthResponse);
+  rpc GetVersion(GetVersionRequest) returns (GetVersionResponse);
 }
 
 // POST, GET and DELETE under /sessions.
@@ -85,6 +87,15 @@ message GetHealthRequest {}
 message GetHealthResponse {
   // True whenever the server answers.
   bool ok = 1;
+  // Changes when the server process restarts. Session IDs are not valid across server instances.
+  string server_instance_id = 2;
+}
+
+message GetVersionRequest {}
+
+message GetVersionResponse {
+  // Build version from CMake's PROJECT_VERSION.
+  string version = 1;
   // Changes when the server process restarts. Session IDs are not valid across server instances.
   string server_instance_id = 2;
 }

@@ -86,7 +86,7 @@ The public product API is limited to these endpoints:
 - `GET /schedulers`
 - `GET /schedulers/{id}`
 
-`GET /healthz` is temporary bootstrap infrastructure and is not part of the product API.
+`GET /healthz` and `GET /version` are temporary bootstrap infrastructure and are not part of the product API.
 
 No other product endpoints should be added without an explicit scope decision.
 
@@ -109,7 +109,7 @@ The gRPC adapter is a second transport over the same application services, built
 - a call that was cancelled, or whose deadline passed, before the server reached it does no work, and `ListSessions` stops between sessions; a call already in an application service completes, since the services do not abandon a lifecycle step midway, as a REST request that outlives its client does
 - settings use the contract's `Value`, which keeps 64-bit integers exact; a read converts the block's `property_map` directly, and an update goes through the JSON form the settings service validates. A `Value` with no kind set is `INVALID_ARGUMENT`; an empty `enum_labels` map is the REST form's absent object
 - sessions list their stream descriptors; stream data stays on the REST paths
-- `ServerService.GetHealth` answers as `GET /healthz` does, with the server instance ID; the standard `grpc.health.v1.Health` service is served as well, for tools that probe it
+- `ServerService.GetHealth` answers as `GET /healthz` does, with the server instance ID; `ServerService.GetVersion` answers as `GET /version` does, with the build version and server instance ID; the standard `grpc.health.v1.Health` service is served as well, for tools that probe it
 - the listener has no transport security, as the REST listener has none
 
 ## CLI

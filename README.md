@@ -125,7 +125,7 @@ GR4CP_GRPC_PORT=50051 ./build/gr4cp_server
 
 The contract is `proto/gr4cp/v1/control_plane.proto`. Each RPC maps to one REST endpoint and calls the same application service, so both APIs see the same sessions. The gRPC API listens on the REST API's host, without transport security, and `GR4CP_GRPC_PORT=0` selects a free port that the server prints and writes to the file `GR4CP_GRPC_PORT_FILE` names. The file is written once the gRPC API is listening, and is only used when `GR4CP_GRPC_PORT=0`. The standard `grpc.health.v1.Health` service is served as well, for tools that probe it.
 
-- `ServerService`: `GetHealth`, the form of `GET /healthz`, with the same `ok` and `server_instance_id`
+- `ServerService`: `GetHealth`, the form of `GET /healthz`, with the same `ok` and `server_instance_id`; `GetVersion`, the form of `GET /version`, with the same `version` and `server_instance_id`
 - `SessionService`: `CreateSession`, `ListSessions`, `GetSession`, `DeleteSession`, `StartSession`, `StopSession`, `RestartSession`
 - `BlockSettingsService`: `GetBlockSettings`, `UpdateBlockSettings`
 - `CatalogService`: `ListBlocks`, `GetBlock`, `ListSchedulers`, `GetScheduler`
@@ -156,7 +156,8 @@ The public product API is limited to these endpoints:
 - `GET /schedulers`
 - `GET /schedulers/{id}`
 
-`GET /healthz` is a temporary bootstrap endpoint and is not part of the product API.
+`GET /healthz` and `GET /version` are temporary bootstrap endpoints and are not part of the product API.
+`GET /version` returns the build version from CMake's `PROJECT_VERSION` with the `server_instance_id`.
 HTTP and WebAssembly health and session responses include `server_instance_id`, stable
 for the server process or loaded WebAssembly module and regenerated on restart.
 Clients must not reuse ownership across instances.

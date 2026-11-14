@@ -679,6 +679,19 @@ TEST_F(GrpcApiTest, GetHealthReportsTheServerInstanceOfItsSessions) {
   EXPECT_EQ(health.server_instance_id(), create_session().server_instance_id());
 }
 
+TEST_F(GrpcApiTest, GetVersionReportsTheBuildVersionAndServerInstance) {
+  const auto stub = v1::ServerService::NewStub(channel);
+  v1::GetVersionResponse version;
+  grpc::ClientContext context;
+  const auto status = stub->GetVersion(&context, {}, &version);
+  ASSERT_TRUE(status.ok()) << status.error_message();
+
+  EXPECT_FALSE(version.version().empty());
+  EXPECT_EQ(version.server_instance_id().size(), 36U);
+  EXPECT_EQ(version.server_instance_id(),
+            create_session().server_instance_id());
+}
+
 TEST_F(GrpcApiTest, StandardHealthServiceReportsServing) {
   // The health protocol's messages are not generated here: Check takes an empty
   // request, and SERVING is field 1 with value 1.

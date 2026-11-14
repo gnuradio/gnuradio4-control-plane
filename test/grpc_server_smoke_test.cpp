@@ -210,6 +210,23 @@ TEST_F(GrpcServerExecutableTest, ServesBothApisOverTheSameSessions) {
   EXPECT_EQ(nlohmann::json::parse(rest_health->body).at("server_instance_id"),
             health.server_instance_id());
 
+  v1::GetVersionResponse version;
+  {
+    grpc::ClientContext context;
+    const auto status = v1::ServerService::NewStub(channel)->GetVersion(
+        &context, v1::GetVersionRequest{}, &version);
+    ASSERT_TRUE(status.ok()) << status.error_message();
+  }
+  EXPECT_FALSE(version.version().empty());
+  EXPECT_EQ(version.server_instance_id(), health.server_instance_id());
+  const auto rest_version = rest.Get("/version");
+  ASSERT_TRUE(rest_version);
+  ASSERT_EQ(rest_version->status, 200);
+  const auto rest_version_body = nlohmann::json::parse(rest_version->body);
+  EXPECT_EQ(rest_version_body.at("version"), version.version());
+  EXPECT_EQ(rest_version_body.at("server_instance_id"),
+            health.server_instance_id());
+
   {
     grpc::ClientContext context;
     v1::ListBlocksResponse blocks;

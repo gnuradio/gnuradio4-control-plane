@@ -386,6 +386,15 @@ public:
       response->set_server_instance_id(server_instance_id());
     });
   }
+
+  grpc::Status GetVersion(grpc::ServerContext *context,
+                          const v1::GetVersionRequest *,
+                          v1::GetVersionResponse *response) override {
+    return execute(context, [&]() {
+      response->set_version(server_version());
+      response->set_server_instance_id(server_instance_id());
+    });
+  }
 };
 
 class SessionRpc final : public v1::SessionService::Service {
