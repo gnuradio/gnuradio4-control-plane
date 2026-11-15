@@ -279,7 +279,7 @@ else()
     add_executable(gr4cp_wasm
         src/wasm_main.cpp
     )
-    set(GR4CP_WASM_BLOCK_LIBRARIES "GrFourierBlocks;GrHttpBlocks;Gr4StudioBlocks;GrBasicBlocks" CACHE STRING
+    set(GR4CP_WASM_BLOCK_LIBRARIES "GrFourierBlocks;GrHttpBlocks;Gr4StudioBlocks;GrBasicBlocks;GrFilterBlocks;GrDigitalBlocks;GrSyncBlocks;GrAnalogBlocks" CACHE STRING
         "gnuradio4 block libraries statically linked into the WASM module")
 
     set(GR4CP_WASM_BLOCK_INCLUDES "")
