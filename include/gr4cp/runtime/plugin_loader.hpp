@@ -16,13 +16,21 @@ class SchedulerRegistry;
 
 namespace gr4cp::runtime {
 
+// Separates the directories of a plugin directory list, as the platform's PATH does: ':', or ';' on Windows, where ':'
+// follows the drive letter. GNURADIO4_PLUGIN_DIRECTORIES and the GR4CP_*PLUGIN_DIRECTORIES build options use it.
+#if defined(_WIN32)
+inline constexpr char kPathListSeparator = ';';
+#else
+inline constexpr char kPathListSeparator = ':';
+#endif
+
 class PluginLoadError : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
 };
 
 // The directories the program searches for blocks, in order: those of GNURADIO4_PLUGIN_DIRECTORIES, then those of
-// the colon-separated `configured_default`. A directory named twice is searched once.
+// the kPathListSeparator-separated `configured_default`. A directory named twice is searched once.
 std::vector<std::string> plugin_directories(std::string_view configured_default);
 
 // Returns the directories the program searches: plugin_directories() of the build's default, which is

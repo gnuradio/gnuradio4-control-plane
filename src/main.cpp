@@ -81,7 +81,11 @@ void print_usage(std::ostream& output) {
               "  GR4CP_PORT                    port to listen on, 8080 by default; 0 selects a free\n"
               "                                loopback port\n"
               "  GR4CP_PORT_FILE               file that receives the port GR4CP_PORT=0 selected\n"
+#if defined(_WIN32)
+              "  GNURADIO4_PLUGIN_DIRECTORIES  semicolon-separated plugin directories, searched first\n"
+#else
               "  GNURADIO4_PLUGIN_DIRECTORIES  colon-separated plugin directories, searched first\n"
+#endif
               "  GR4CP_STREAM_STDIO            1 for line-buffered standard output\n"
               "  GR4CP_STREAM_DEBUG            nonzero to log stream routing to standard error\n"
               "  GR4CP_PROXY_DEBUG             nonzero to log each proxied request to standard error\n";

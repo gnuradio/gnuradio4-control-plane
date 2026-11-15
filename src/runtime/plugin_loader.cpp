@@ -30,9 +30,9 @@ constexpr std::string_view kExtraDirectories = GR4CP_EXTRA_PLUGIN_DIRECTORIES;
 constexpr std::string_view kExtraDirectories = "";
 #endif
 
-// Appends each directory of the colon-separated `list` that `directories` does not hold yet.
+// Appends each directory of the kPathListSeparator-separated `list` that `directories` does not hold yet.
 void append_directories(std::vector<std::string>& directories, std::string_view list) {
-    for (const auto part : std::views::split(list, ':')) {
+    for (const auto part : std::views::split(list, kPathListSeparator)) {
         std::string directory(std::string_view(part.begin(), part.end()));
         if (!directory.empty() && std::ranges::find(directories, directory) == directories.end()) {
             directories.push_back(std::move(directory));
@@ -55,7 +55,7 @@ constexpr std::string_view kNoEntryPointReason = "Failed to load symbol gr_plugi
 std::string joined(std::span<const std::string> directories) {
     std::string text;
     for (const auto& directory : directories) {
-        text += text.empty() ? directory : ":" + directory;
+        text += text.empty() ? directory : kPathListSeparator + directory;
     }
     return text.empty() ? "<none>" : text;
 }
@@ -79,7 +79,7 @@ std::vector<std::string> plugin_directories() {
     std::string configured_default = kReplacingDirectories.empty() ? std::string(gr::installedPluginDirectory())
                                                                    : std::string(kReplacingDirectories);
     if (!kExtraDirectories.empty()) {
-        configured_default += ":" + std::string(kExtraDirectories);
+        configured_default += kPathListSeparator + std::string(kExtraDirectories);
     }
     return plugin_directories(configured_default);
 #endif

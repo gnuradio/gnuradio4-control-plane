@@ -575,14 +575,17 @@ TEST_F(Gr4RuntimeManagerTest, CompatibilityStudioWaterfallSinkHttpStreamCanBeFet
 }
 
 TEST_F(Gr4RuntimeManagerTest, PluginDirectoriesComeFromTheEnvironmentThenTheDefault) {
+    const std::string separator(1, gr4cp::runtime::kPathListSeparator);
+    const std::string defaults = "/default/one" + separator + "/default/two";
     {
-        const ScopedVariable variable("GNURADIO4_PLUGIN_DIRECTORIES", "/env/one:/env/two:/default/one");
-        EXPECT_EQ(gr4cp::runtime::plugin_directories("/default/one:/default/two"),
+        const ScopedVariable variable("GNURADIO4_PLUGIN_DIRECTORIES",
+                                      "/env/one" + separator + "/env/two" + separator + "/default/one");
+        EXPECT_EQ(gr4cp::runtime::plugin_directories(defaults),
                   (std::vector<std::string>{"/env/one", "/env/two", "/default/one", "/default/two"}));
     }
     {
         const ScopedVariable variable("GNURADIO4_PLUGIN_DIRECTORIES", std::nullopt);
-        EXPECT_EQ(gr4cp::runtime::plugin_directories("/default/one:/default/two"),
+        EXPECT_EQ(gr4cp::runtime::plugin_directories(defaults),
                   (std::vector<std::string>{"/default/one", "/default/two"}));
     }
 }
@@ -593,7 +596,7 @@ TEST_F(Gr4RuntimeManagerTest, SearchStartsAtTheInstalledPluginDirectory) {
     const ScopedVariable variable("GNURADIO4_PLUGIN_DIRECTORIES", std::nullopt);
     const std::string_view replacing = GR4CP_PLUGIN_DIRECTORIES;
     const auto expected = replacing.empty() ? std::string(gr::installedPluginDirectory())
-                                            : std::string(replacing.substr(0, replacing.find(':')));
+                                            : std::string(replacing.substr(0, replacing.find(gr4cp::runtime::kPathListSeparator)));
 
     const auto directories = gr4cp::runtime::plugin_directories();
 
