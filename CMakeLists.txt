@@ -145,6 +145,32 @@ if(GR4CP_ENABLE_GR4_CATALOG)
             gr4cp_remove_imported_werror(gnuradio4::gnuradio-core)
             gr4cp_remove_imported_werror(gnuradio4::gnuradio-blocklib-core)
         endif()
+        include(CheckCXXSourceCompiles)
+        set(CMAKE_REQUIRED_LIBRARIES gnuradio4::gnuradio-core)
+        check_cxx_source_compiles([=[
+            #include <gnuradio-4.0/Graph.hpp>
+            #include <gnuradio-4.0/Runtime.hpp>
+            #include <gnuradio-4.0/SchedulerModel.hpp>
+            #include <chrono>
+            #include <functional>
+            #include <memory>
+            #include <utility>
+            static_assert(requires(gr::Runtime& runtime, gr::SchedulerModel& scheduler,
+                                   std::unique_ptr<gr::Graph> graph,
+                                   std::function<void(gr::SchedulerModel&)> operation) {
+                gr::RuntimeGraph::adopt(std::move(graph), std::shared_ptr<gr::PluginLoader>{});
+                runtime.blocks();
+                runtime.withScheduler(operation);
+                scheduler.stopAfterDrain(std::chrono::seconds(1));
+            });
+            int main() {}
+        ]=] GR4CP_HAVE_NATIVE_RUNTIME)
+        unset(CMAKE_REQUIRED_LIBRARIES)
+        if(NOT GR4CP_HAVE_NATIVE_RUNTIME)
+            message(FATAL_ERROR
+                "GNU Radio Core native Runtime adoption and cooperative drain are required (Core PRs #176, #223, #224). "
+                "Use a matching Core and Blocks SDK; rebuilding only Core leaves incompatible block plugins.")
+        endif()
         cmake_path(GET gnuradio4_DIR PARENT_PATH _gr4cp_gnuradio4_cmake_dir)
         cmake_path(GET _gr4cp_gnuradio4_cmake_dir PARENT_PATH GR4CP_GNURADIO4_LIB_DIR)
         message(STATUS "Building with GNU Radio 4-backed block catalog from ${GR4CP_GNURADIO4_LIB_DIR}")

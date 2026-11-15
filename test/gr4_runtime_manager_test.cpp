@@ -10,6 +10,7 @@
 
 #include <gnuradio-4.0/BlockRegistry.hpp>
 #include <gnuradio-4.0/PluginLoader.hpp>
+#include <gnuradio-4.0/Scheduler.hpp>
 #include <gnuradio-4.0/SchedulerModel.hpp>
 
 #include <gtest/gtest.h>
@@ -1410,6 +1411,141 @@ connections:
     EXPECT_EQ(runtime_.stop(session), std::nullopt);
     runtime_.destroy(session);
     EXPECT_EQ(gr4cp::test::CountedSource::alive(), alive_before);
+}
+
+// Native integrations exercise the actual Runtime with a Core-only loader, so
+// these cases do not skip when no installed block catalog is available.
+TEST(NativeRuntimeLifecycleTest, OpaqueExecutionIdentitySurvivesPauseAndChangesOnRestart) {
+    auto loader = std::make_shared<gr::PluginLoader>(gr::globalBlockRegistry(), gr::globalSchedulerRegistry(),
+                                                     std::span<const std::string>{});
+    gr4cp::runtime::Gr4RuntimeManager runtime(loader);
+    gr4cp::storage::InMemorySessionRepository repository;
+    gr4cp::app::SessionService service(repository, runtime);
+    auto session = service.create("native", "blocks: []\nconnections: []\n");
+    std::vector<std::uint64_t> generations;
+    std::vector<std::weak_ptr<gr::BlockModel>> blocks;
+    int starts = 0, stops = 0;
+    runtime.set_native_graph_factory(
+        session,
+        [&](const auto &, std::uint64_t generation) {
+            generations.push_back(generation);
+            auto graph = std::make_unique<gr::Graph>();
+            auto &source = graph->emplaceBlock<gr4cp::test::CountedSource>({{"name", "source"}});
+            auto &sink = graph->emplaceBlock<gr4cp::test::StreamEndpointSink>({{"name", "sink"}});
+            if (!graph->connect<"out", "in">(source, sink))
+                throw std::runtime_error("test connection failed");
+            blocks.assign(graph->blocks().begin(), graph->blocks().end());
+            return graph;
+        },
+        [&](auto &, std::uint64_t, bool started) { started ? ++starts : ++stops; });
+    session = service.start(session.id);
+    ASSERT_TRUE(session.execution_id.has_value());
+    EXPECT_TRUE(session.execution_id->starts_with("exec_"));
+    const auto firstId = *session.execution_id;
+    ASSERT_EQ(generations.size(), 1U);
+    const auto first = generations.front();
+    EXPECT_EQ(runtime.execution_status(session).generation, first);
+    EXPECT_EQ(service.pause(session.id, firstId).state, gr4cp::domain::SessionState::Paused);
+    EXPECT_EQ(runtime.execution_status(session).state, "paused");
+    EXPECT_THROW(runtime.resume(session, first + 1), std::runtime_error);
+    EXPECT_THROW(runtime.with_execution(session, first, [](auto &) {}), std::runtime_error);
+    EXPECT_NO_THROW(runtime.with_execution(session, first, [](auto &) {}, true));
+    EXPECT_THROW(service.resume(session.id, firstId + "-stale"), gr4cp::app::InvalidStateError);
+    EXPECT_EQ(service.resume(session.id, firstId).state, gr4cp::domain::SessionState::Running);
+    EXPECT_EQ(service.get(session.id).execution_id, session.execution_id);
+    session = service.restart(session.id);
+    ASSERT_EQ(generations.size(), 2U);
+    EXPECT_GT(generations.back(), first);
+    EXPECT_NE(session.execution_id, firstId);
+    EXPECT_THROW(runtime.with_execution(session, first, [](auto &) {}), std::runtime_error);
+    EXPECT_EQ(starts, 2);
+    EXPECT_EQ(stops, 1);
+    session = service.stop(session.id);
+    EXPECT_EQ(session.state, gr4cp::domain::SessionState::Stopped);
+    EXPECT_EQ(stops, 2);
+    EXPECT_TRUE(std::ranges::all_of(blocks, [](const auto &weak) { return weak.expired(); }));
+    const auto settings = runtime.get_block_settings(session, "source");
+    EXPECT_TRUE(settings.contains("name"));
+    EXPECT_FALSE(settings.contains("__gr4cp_terminal"));
+    service.remove(session.id);
+    EXPECT_EQ(stops, 2);
+}
+
+TEST(NativeRuntimeLifecycleTest, CompositionRefreshesHandlesEvenWhenTheNativeCallbackThrows) {
+    auto loader = std::make_shared<gr::PluginLoader>(gr::globalBlockRegistry(), gr::globalSchedulerRegistry(),
+                                                     std::span<const std::string>{});
+    gr4cp::runtime::Gr4RuntimeManager runtime(loader);
+    gr4cp::storage::InMemorySessionRepository repository;
+    gr4cp::app::SessionService service(repository, runtime);
+    auto session = service.create("compose", "blocks: []\nconnections: []\n");
+    gr4cp::test::CountedSource *source = nullptr;
+    runtime.set_native_graph_factory(session, [&](const auto &, std::uint64_t) {
+        auto graph = std::make_unique<gr::Graph>();
+        source = &graph->emplaceBlock<gr4cp::test::CountedSource>({{"name", "source"}});
+        auto &sink = graph->emplaceBlock<gr4cp::test::StreamEndpointSink>({{"name", "sink"}});
+        if (!graph->connect<"out", "in">(*source, sink))
+            throw std::runtime_error("test connection failed");
+        return graph;
+    });
+    session = service.start(session.id);
+    const auto generation = runtime.execution_status(session).generation;
+    gr::CompositionBranch branch;
+    EXPECT_THROW(runtime.with_execution(session, generation,
+                                        [&](gr::SchedulerModel &scheduler) {
+                                            auto composed = scheduler.compose([&](gr::CompositionEditor &edit) {
+                                                auto &sink = edit.emplaceBlock<gr4cp::test::StreamEndpointSink>(
+                                                    {{"name", "attached"}});
+                                                edit.connect(*source, "out", sink, "in");
+                                            });
+                                            if (!composed)
+                                                throw std::runtime_error(composed.error().message);
+                                            branch = composed->branch;
+                                            throw std::runtime_error("operation failed after successful composition");
+                                        }),
+                 std::runtime_error);
+    EXPECT_TRUE(runtime.get_block_settings(session, "attached").contains("name"));
+    runtime.with_execution(session, generation, [&](gr::SchedulerModel &scheduler) {
+        if (auto removed = scheduler.removeBranch(branch); !removed)
+            throw std::runtime_error(removed.error().message);
+    });
+    EXPECT_THROW(runtime.get_block_settings(session, "attached"), gr4cp::runtime::BlockNotFoundError);
+    EXPECT_EQ(service.stop(session.id).state, gr4cp::domain::SessionState::Stopped);
+    service.remove(session.id);
+}
+
+TEST(NativeRuntimeLifecycleTest, NativeFinalSettingsKeepTheBaseSnapshotPolicy) {
+    auto loader = std::make_shared<gr::PluginLoader>(gr::globalBlockRegistry(), gr::globalSchedulerRegistry(),
+                                                     std::span<const std::string>{});
+    gr4cp::runtime::Gr4RuntimeManager runtime(loader);
+    gr4cp::storage::InMemorySessionRepository repository;
+    gr4cp::app::SessionService service(repository, runtime);
+    for (const bool finite : {false, true}) {
+        auto session = service.create("native-snapshot", "blocks: []\nconnections: []\n");
+        std::weak_ptr<gr::BlockModel> sourceHandle;
+        runtime.set_native_graph_factory(session, [&](const auto &, std::uint64_t) {
+            auto graph = std::make_unique<gr::Graph>();
+            auto &source = graph->emplaceBlock<gr4cp::test::TerminalSettingsSource>(
+                {{"name", "source"}, {"n_samples", gr::Size_t{finite ? 64U : 0U}}});
+            auto &sink = graph->emplaceBlock<gr4cp::test::StreamEndpointSink>();
+            if (!graph->connect<"out", "in">(source, sink))
+                throw std::runtime_error("test connection failed");
+            sourceHandle = graph->blocks().front();
+            return graph;
+        });
+        session = service.start(session.id);
+        const auto identity = session.execution_id;
+        session = finite ? read_until(service, session.id,
+                                      [](const auto &s) { return s.state != gr4cp::domain::SessionState::Running; })
+                         : service.stop(session.id);
+        EXPECT_EQ(session.state, gr4cp::domain::SessionState::Stopped);
+        EXPECT_EQ(session.execution_id, identity);
+        EXPECT_TRUE(sourceHandle.expired());
+        const auto settings = runtime.get_block_settings(session, "source");
+        EXPECT_EQ(settings.at("payload").value_or(std::string{}).size(), 5U * 1024U * 1024U);
+        EXPECT_TRUE(settings.contains("finalization"));
+        EXPECT_FALSE(settings.contains("__gr4cp_terminal"));
+        service.remove(session.id);
+    }
 }
 
 }  // namespace

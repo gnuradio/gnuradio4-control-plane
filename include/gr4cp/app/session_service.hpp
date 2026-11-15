@@ -1,6 +1,7 @@
 #pragma once
 
 #include <condition_variable>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -46,6 +47,8 @@ public:
     domain::Session get(const std::string& id);
     domain::Session start(const std::string& id);
     domain::Session stop(const std::string& id);
+    domain::Session pause(const std::string &id, const std::string &execution_id);
+    domain::Session resume(const std::string &id, const std::string &execution_id);
     domain::Session restart(const std::string& id);
     void remove(const std::string& id);
     std::optional<domain::StreamRuntimePlan> active_stream_plan(const std::string& id);
