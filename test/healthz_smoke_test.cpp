@@ -100,6 +100,12 @@ TEST(HealthzSmokeTest, ReturnsOkJson) {
     const auto again = client.Get("/healthz");
     ASSERT_TRUE(again);
     EXPECT_EQ(nlohmann::json::parse(again->body), body);
+    const auto versioned = client.Get("/version");
+    ASSERT_TRUE(versioned);
+    EXPECT_EQ(versioned->status, 200);
+    const auto version_body = nlohmann::json::parse(versioned->body);
+    EXPECT_FALSE(version_body.at("version").get<std::string>().empty());
+    EXPECT_EQ(version_body.at("server_instance_id"), body.at("server_instance_id"));
     const auto session = client.Post("/sessions", R"({"name":"identity-check","grc":"graph"})", "application/json");
     ASSERT_TRUE(session);
     ASSERT_EQ(session->status, 201);

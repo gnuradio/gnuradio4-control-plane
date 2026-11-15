@@ -362,6 +362,9 @@ WasmResponse WasmApi::dispatch(const std::string& method, const std::string& tar
             if (path == "/healthz") {
                 return json_response(Json{{"ok", true}, {"server_instance_id", server_instance_id()}});
             }
+            if (path == "/version") {
+                return json_response(Json{{"version", server_version()}, {"server_instance_id", server_instance_id()}});
+            }
             if (path == "/blocks") {
                 return json_response(blocks_to_json(block_catalog_service_.list()));
             }

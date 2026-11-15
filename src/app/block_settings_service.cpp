@@ -89,10 +89,15 @@ BlockSettingsUpdateResult BlockSettingsService::update(const std::string& sessio
 
 BlockSettingsService::Json BlockSettingsService::get(const std::string& session_id,
                                                      const std::string& block_unique_name) {
+    return property_map_to_json(get_properties(session_id, block_unique_name));
+}
+
+gr::property_map BlockSettingsService::get_properties(const std::string& session_id,
+                                                      const std::string& block_unique_name) {
     const auto session = sessions_.get(session_id);
 
     try {
-        return property_map_to_json(runtime_manager_.get_block_settings(session, block_unique_name));
+        return runtime_manager_.get_block_settings(session, block_unique_name);
     } catch (const runtime::BlockNotFoundError& error) {
         throw NotFoundError(error.what());
     } catch (const runtime::SessionNotRunningError& error) {

@@ -1,0 +1,280 @@
+syntax = "proto3";
+
+package gr4cp.v1;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+// The gRPC form of the control plane's REST API. Each RPC maps to one REST endpoint and calls the same
+// application service. The standard grpc.health.v1.Health service is served as well, for tools that probe it.
+//
+// Errors use these status codes:
+//   INVALID_ARGUMENT     the request is malformed, or a block refused a settings patch (REST 400)
+//   NOT_FOUND            the session, block or scheduler does not exist (REST 404)
+//   FAILED_PRECONDITION  the session is not in a state that allows the call (REST 409)
+//   INTERNAL             the runtime or a catalog failed (REST 500)
+//
+// A failed call also carries the REST API's error code in the trailing metadata key `gr4cp-error-code`:
+// validation_error, not_found, invalid_state, runtime_error, catalog_error, scheduler_catalog_error or
+// internal_error.
+//
+// Every call honours the client's deadline and cancellation. The client gets DEADLINE_EXCEEDED or CANCELLED at
+// once. A call the server has not begun does no work. A call that is already running in the server completes
+// there, so after a deadline on a call that changes a session, read the session to learn its state.
+//
+// The server keeps gRPC's default limit of 4 MiB for a request message, so a CreateSession whose flowgraph is
+// larger fails with RESOURCE_EXHAUSTED and carries no `gr4cp-error-code`. A client applies its own limit, also
+// 4 MiB by default, to each response; raise it if ListBlocks outgrows it.
+
+// GET /healthz and GET /version.
+service ServerService {
+  rpc GetHealth(GetHealthRequest) returns (GetHealthResponse);
+  rpc GetVersion(GetVersionRequest) returns (GetVersionResponse);
+}
+
+// POST, GET and DELETE under /sessions.
+service SessionService {
+  rpc CreateSession(CreateSessionRequest) returns (Session);
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+  rpc GetSession(GetSessionRequest) returns (Session);
+  rpc DeleteSession(DeleteSessionRequest) returns (google.protobuf.Empty);
+  rpc StartSession(StartSessionRequest) returns (Session);
+  rpc StopSession(StopSessionRequest) returns (Session);
+  rpc RestartSession(RestartSessionRequest) returns (Session);
+}
+
+// GET and POST /sessions/{id}/blocks/{unique_name}/settings.
+service BlockSettingsService {
+  rpc GetBlockSettings(GetBlockSettingsRequest) returns (GetBlockSettingsResponse);
+  rpc UpdateBlockSettings(UpdateBlockSettingsRequest) returns (UpdateBlockSettingsResponse);
+}
+
+// GET under /blocks and /schedulers.
+service CatalogService {
+  rpc ListBlocks(ListBlocksRequest) returns (ListBlocksResponse);
+  rpc GetBlock(GetBlockRequest) returns (Block);
+  rpc ListSchedulers(ListSchedulersRequest) returns (ListSchedulersResponse);
+  rpc GetScheduler(GetSchedulerRequest) returns (Scheduler);
+}
+
+// A setting or a parameter default. Unlike google.protobuf.Value it keeps 64-bit integers exact.
+// A Value with no kind set is invalid: an update carrying one fails with INVALID_ARGUMENT.
+message Value {
+  oneof kind {
+    google.protobuf.NullValue null_value = 1;
+    bool bool_value = 2;
+    sint64 int_value = 3;
+    uint64 uint_value = 4;
+    double double_value = 5;
+    string string_value = 6;
+    ListValue list_value = 7;
+    MapValue map_value = 8;
+  }
+}
+
+message ListValue {
+  repeated Value values = 1;
+}
+
+// A complex number is a map of its two parts, "real" and "imag", as in the REST API.
+message MapValue {
+  map<string, Value> fields = 1;
+}
+
+message GetHealthRequest {}
+
+message GetHealthResponse {
+  // True whenever the server answers.
+  bool ok = 1;
+  // Changes when the server process restarts. Session IDs are not valid across server instances.
+  string server_instance_id = 2;
+}
+
+message GetVersionRequest {}
+
+message GetVersionResponse {
+  // Build version from CMake's PROJECT_VERSION.
+  string version = 1;
+  // Changes when the server process restarts. Session IDs are not valid across server instances.
+  string server_instance_id = 2;
+}
+
+enum SessionState {
+  SESSION_STATE_UNSPECIFIED = 0;
+  SESSION_STATE_STOPPED = 1;
+  SESSION_STATE_RUNNING = 2;
+  SESSION_STATE_ERROR = 3;
+}
+
+// How a session's last run ended.
+enum CompletionReason {
+  COMPLETION_REASON_UNSPECIFIED = 0;
+  COMPLETION_REASON_COMPLETED = 1;
+  COMPLETION_REASON_STOPPED = 2;
+  COMPLETION_REASON_ERROR = 3;
+}
+
+// A data stream of a running session. The data itself is served by the REST API at `path`.
+message Stream {
+  string id = 1;
+  string block_instance_name = 2;
+  string transport = 3;
+  string payload_format = 4;
+  string path = 5;
+  bool ready = 6;
+}
+
+message Session {
+  string id = 1;
+  // Changes when the server process restarts. Session IDs are not valid across server instances.
+  string server_instance_id = 2;
+  string name = 3;
+  SessionState state = 4;
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp updated_at = 6;
+  optional string last_error = 7;
+  optional string scheduler_id = 8;
+  // Identifies the most recent successful start or restart.
+  optional string execution_id = 9;
+  optional CompletionReason completion_reason = 10;
+  // Set by GetSession and ListSessions for a session whose run has streams.
+  repeated Stream streams = 11;
+}
+
+message CreateSessionRequest {
+  string name = 1;
+  // The flowgraph in GRC form. Required.
+  string grc = 2;
+  optional string scheduler_id = 3;
+}
+
+message ListSessionsRequest {}
+
+message ListSessionsResponse {
+  repeated Session sessions = 1;
+}
+
+message GetSessionRequest {
+  string session_id = 1;
+}
+
+message DeleteSessionRequest {
+  string session_id = 1;
+}
+
+message StartSessionRequest {
+  string session_id = 1;
+}
+
+message StopSessionRequest {
+  string session_id = 1;
+}
+
+message RestartSessionRequest {
+  string session_id = 1;
+}
+
+enum BlockSettingsMode {
+  // Staged, as in the REST API when `mode` is absent.
+  BLOCK_SETTINGS_MODE_UNSPECIFIED = 0;
+  BLOCK_SETTINGS_MODE_STAGED = 1;
+  BLOCK_SETTINGS_MODE_IMMEDIATE = 2;
+}
+
+message GetBlockSettingsRequest {
+  string session_id = 1;
+  string block_unique_name = 2;
+}
+
+message GetBlockSettingsResponse {
+  map<string, Value> settings = 1;
+}
+
+message UpdateBlockSettingsRequest {
+  string session_id = 1;
+  string block_unique_name = 2;
+  map<string, Value> settings = 3;
+  BlockSettingsMode mode = 4;
+}
+
+message UpdateBlockSettingsResponse {
+  string session_id = 1;
+  string block = 2;
+  string applied_via = 3;
+  bool accepted = 4;
+}
+
+enum BlockPortCardinalityKind {
+  BLOCK_PORT_CARDINALITY_KIND_UNSPECIFIED = 0;
+  BLOCK_PORT_CARDINALITY_KIND_FIXED = 1;
+  BLOCK_PORT_CARDINALITY_KIND_DYNAMIC = 2;
+}
+
+message BlockPort {
+  string name = 1;
+  string type = 2;
+  BlockPortCardinalityKind cardinality_kind = 3;
+  optional int32 current_port_count = 4;
+  optional int32 render_port_count = 5;
+  optional int32 min_port_count = 6;
+  optional int32 max_port_count = 7;
+  optional string size_parameter = 8;
+  optional string handle_name_template = 9;
+}
+
+message StringList {
+  repeated string values = 1;
+}
+
+message BlockParameter {
+  string name = 1;
+  string type = 2;
+  bool required = 3;
+  Value default_value = 4;
+  string summary = 5;
+  optional string runtime_mutability = 6;
+  optional string value_kind = 7;
+  // Absent when the parameter is not an enumeration.
+  StringList enum_choices = 8;
+  optional string enum_type = 9;
+  // Empty when the parameter has no labels, as the REST API omits an empty object.
+  map<string, string> enum_labels = 10;
+  optional string enum_source = 11;
+  optional string ui_hint = 12;
+  optional bool allow_custom_value = 13;
+}
+
+message Block {
+  string id = 1;
+  string name = 2;
+  string category = 3;
+  string summary = 4;
+  repeated BlockPort inputs = 5;
+  repeated BlockPort outputs = 6;
+  repeated BlockParameter parameters = 7;
+}
+
+message ListBlocksRequest {}
+
+message ListBlocksResponse {
+  repeated Block blocks = 1;
+}
+
+message GetBlockRequest {
+  string block_id = 1;
+}
+
+message Scheduler {
+  string id = 1;
+}
+
+message ListSchedulersRequest {}
+
+message ListSchedulersResponse {
+  repeated Scheduler schedulers = 1;
+}
+
+message GetSchedulerRequest {
+  string scheduler_id = 1;
+}

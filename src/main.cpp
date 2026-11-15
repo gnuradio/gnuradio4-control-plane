@@ -4,6 +4,9 @@
 #include "gr4cp/app/session_service.hpp"
 #include "gr4cp/app/session_stream_service.hpp"
 #include "gr4cp/api/http_server.hpp"
+#if defined(GR4CP_HAVE_GRPC)
+#include "gr4cp/api/grpc_server.hpp"
+#endif
 #include "gr4cp/catalog/gr4_block_catalog_provider.hpp"
 #include "gr4cp/catalog/gr4_scheduler_catalog_provider.hpp"
 #include "gr4cp/runtime/gr4_runtime_manager.hpp"
@@ -56,19 +59,21 @@ void configure_managed_stdio() {
     std::abort();
 }
 
-void write_port_file(const char* path, int port) {
+// Writes `port` to the file the environment variable `variable` names. Does nothing when the variable is unset.
+void write_port_file(const char* variable, int port) {
+    const char* path = std::getenv(variable);
     if (path == nullptr || path[0] == '\0') {
         return;
     }
 
     std::ofstream output(path, std::ios::trunc);
     if (!output) {
-        throw std::runtime_error(std::string("failed to open GR4CP_PORT_FILE: ") + path);
+        throw std::runtime_error(std::string("failed to open ") + variable + ": " + path);
     }
     output << port << '\n';
     output.close();
     if (!output) {
-        throw std::runtime_error(std::string("failed to write GR4CP_PORT_FILE: ") + path);
+        throw std::runtime_error(std::string("failed to write ") + variable + ": " + path);
     }
 }
 
@@ -81,6 +86,12 @@ void print_usage(std::ostream& output) {
               "  GR4CP_PORT                    port to listen on, 8080 by default; 0 selects a free\n"
               "                                loopback port\n"
               "  GR4CP_PORT_FILE               file that receives the port GR4CP_PORT=0 selected\n"
+#if defined(GR4CP_HAVE_GRPC)
+              "  GR4CP_GRPC_PORT               port of the gRPC API, which is off when unset; 0 selects\n"
+              "                                a free port. The API listens on the REST API's host,\n"
+              "                                without transport security\n"
+              "  GR4CP_GRPC_PORT_FILE          file that receives the port GR4CP_GRPC_PORT=0 selected\n"
+#endif
               "  GNURADIO4_PLUGIN_DIRECTORIES  colon-separated plugin directories, searched first\n"
               "  GR4CP_STREAM_STDIO            1 for line-buffered standard output\n"
               "  GR4CP_STREAM_DEBUG            nonzero to log stream routing to standard error\n"
@@ -150,7 +161,7 @@ int main(int argc, char** argv) {
                 std::cerr << "gr4cp_server: failed to reserve an available loopback port\n";
                 return 1;
             }
-            write_port_file(std::getenv("GR4CP_PORT_FILE"), listen_port);
+            write_port_file("GR4CP_PORT_FILE", listen_port);
             std::cout << "Reserved 127.0.0.1:" << listen_port << '\n';
         }
 
@@ -170,6 +181,26 @@ int main(int argc, char** argv) {
         }
 
         const std::string listen_host = requested_port == 0 ? "127.0.0.1" : "0.0.0.0";
+#if defined(GR4CP_HAVE_GRPC)
+        gr4cp::api::GrpcServer grpc_server(session_service,
+                                           block_catalog_service,
+                                           scheduler_catalog_service,
+                                           block_settings_service);
+        if (const char* grpc_port_env = std::getenv("GR4CP_GRPC_PORT");
+            grpc_port_env != nullptr && grpc_port_env[0] != '\0') {
+            const int requested_grpc_port = std::stoi(grpc_port_env);
+            const int grpc_port = grpc_server.start(listen_host, requested_grpc_port);
+            if (grpc_port <= 0) {
+                std::cerr << "gr4cp_server: gRPC server failed to listen on " << listen_host << ':' << grpc_port_env
+                          << '\n';
+                return 1;
+            }
+            if (requested_grpc_port == 0) {
+                write_port_file("GR4CP_GRPC_PORT_FILE", grpc_port);
+            }
+            std::cout << "gRPC listening on " << listen_host << ':' << grpc_port << std::endl;
+        }
+#endif
         std::cout << "Listening on " << listen_host << ':' << listen_port << '\n';
         const bool listened =
             requested_port == 0 ? server.listen_after_bind() : server.listen(listen_host, listen_port);

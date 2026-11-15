@@ -12,6 +12,7 @@
 namespace gr4cp::api {
 
 const std::string& server_instance_id();
+const std::string& server_version();
 
 nlohmann::json session_to_json(const domain::Session& session,
                                const std::optional<domain::StreamRuntimePlan>& stream_plan = std::nullopt);
