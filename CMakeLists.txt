@@ -58,7 +58,9 @@ else()
     message(WARNING "GR4CP_ENABLE_GR4_CATALOG=OFF disables the production server catalog path; tests may still use local fake providers.")
 endif()
 
-add_library(gr4cp_core
+# The core and client libraries are internal to the server, CLI and tests and export no symbols, so they are static
+# whatever BUILD_SHARED_LIBS says: an MSVC DLL that exports nothing has no import library to link against.
+add_library(gr4cp_core STATIC
     src/api/session_json.cpp
     src/app/block_settings_service.cpp
     src/app/block_catalog_service.cpp
@@ -137,7 +139,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
 endif()
 
 if(NOT EMSCRIPTEN)
-    add_library(gr4cp_cli
+    add_library(gr4cp_cli STATIC
         src/cli/cli.cpp
     )
 
@@ -367,16 +369,8 @@ if(COMMAND gr_install_artifact)
         endif()
         gr_install_artifact(TARGETS gr4cp_server gr4cp_cli_exec COMPONENT CORE ${_gr4cp_runtime_dependency_args})
 
-        # Static by default, so only their archives install, to DEVELOP. With BUILD_SHARED_LIBS the server and CLI
-        # load them, so the libraries themselves belong in CORE and carry the same runtime dependencies.
-        get_target_property(_gr4cp_core_type gr4cp_core TYPE)
-        if(_gr4cp_core_type STREQUAL "SHARED_LIBRARY")
-            set(_gr4cp_library_dependency_args ${_gr4cp_runtime_dependency_args})
-        else()
-            set(_gr4cp_library_dependency_args)
-        endif()
-        gr_install_artifact(TARGETS gr4cp_core gr4cp_cli
-            COMPONENT CORE ARCHIVE_COMPONENT DEVELOP ${_gr4cp_library_dependency_args})
+        # the libraries are static, so only their archives install, to DEVELOP
+        gr_install_artifact(TARGETS gr4cp_core gr4cp_cli COMPONENT CORE ARCHIVE_COMPONENT DEVELOP)
     endif()
 
     gr_install_artifact(DIRECTORY include/gr4cp/
