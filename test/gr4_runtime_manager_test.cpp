@@ -14,7 +14,11 @@
 
 #include <gtest/gtest.h>
 
+#if defined(_WIN32)
+#include <process.h>
+#else
 #include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -134,6 +138,14 @@ std::vector<std::string> process_environment() {
 // The environment as the process started with it, before any case or the test loader ran.
 const std::vector<std::string> kEnvironmentAtStart = process_environment();
 
+int process_id() {
+#if defined(_WIN32)
+    return ::_getpid();
+#else
+    return static_cast<int>(::getpid());
+#endif
+}
+
 // Sets or unsets one environment variable for a scope and restores it after.
 class ScopedVariable {
 public:
@@ -150,9 +162,16 @@ public:
 private:
     void set(const std::optional<std::string>& value) {
         if (value.has_value()) {
+#if defined(_WIN32)
+            (void)::_putenv_s(name_.c_str(), value->c_str());
+        } else {
+            // an empty value removes the variable
+            (void)::_putenv_s(name_.c_str(), "");
+#else
             ::setenv(name_.c_str(), value->c_str(), 1);
         } else {
             ::unsetenv(name_.c_str());
+#endif
         }
     }
 
@@ -603,7 +622,7 @@ TEST_F(Gr4RuntimeManagerTest, SearchStartsAtTheInstalledPluginDirectory) {
 
 // Each directory list loads into registries of its own. The blocks this process registered before do not count.
 TEST(PluginLoaderTest, StartupRefusesAMissingAnUnreadableAndAnEmptyDirectory) {
-    const auto root = std::filesystem::temp_directory_path() / std::format("gr4cp-plugin-directories-{}", ::getpid());
+    const auto root = std::filesystem::temp_directory_path() / std::format("gr4cp-plugin-directories-{}", process_id());
     const auto missing = (root / "missing").string();
     const auto unreadable = (root / "unreadable").string();
     const auto empty = (root / "empty").string();
@@ -651,7 +670,7 @@ TEST(PluginLoaderTest, StartupPassesOverACoreLibraryBesideThePlugins) {
     const ScopedVariable variable("GNURADIO4_PLUGIN_DIRECTORIES", std::nullopt);
     const auto plugins = gr4cp::runtime::plugin_directories();
     ASSERT_FALSE(plugins.empty());
-    const auto directory = std::filesystem::temp_directory_path() / std::format("gr4cp-core-library-{}", ::getpid());
+    const auto directory = std::filesystem::temp_directory_path() / std::format("gr4cp-core-library-{}", process_id());
     std::filesystem::create_directories(directory);
     for (const auto& entry : std::filesystem::directory_iterator(plugins.front())) {
         std::filesystem::create_symlink(entry.path(), directory / entry.path().filename());
@@ -696,10 +715,13 @@ TEST(PluginLoaderTest, StartupPassesOverACoreLibraryBesideThePlugins) {
 // load_plugins() refuses a directory that holds a plugin that fails. The one-line message names the directory, the
 // file and the loader's reason.
 TEST(PluginLoaderTest, StartupRefusalNamesTheDirectoryAndThePluginThatFailed) {
-    const auto directory = std::filesystem::temp_directory_path() / std::format("gr4cp-broken-plugin-{}", ::getpid());
+    const auto directory = std::filesystem::temp_directory_path() / std::format("gr4cp-broken-plugin-{}", process_id());
     std::filesystem::create_directories(directory);
-    const auto plugin = (directory / "libbroken-plugin.so").string();
-    std::filesystem::copy_file(required_path("GR4CP_BROKEN_PLUGIN_LIBRARY"), plugin);
+    // the loader only looks at files with the platform's shared-library suffix, ".dll" on Windows
+    const std::filesystem::path source = required_path("GR4CP_BROKEN_PLUGIN_LIBRARY");
+    const auto file_name = "libbroken-plugin" + source.extension().string();
+    const auto plugin = (directory / file_name).string();
+    std::filesystem::copy_file(source, plugin);
 
     std::string refusal = "<accepted>";
     std::string reason;
@@ -717,10 +739,12 @@ TEST(PluginLoaderTest, StartupRefusalNamesTheDirectoryAndThePluginThatFailed) {
             reason = failure->second;
         }
     }
-    std::filesystem::remove_all(directory);
+    // Windows refuses to delete a DLL that is still mapped, and the loader may keep the one it refused
+    std::error_code ignored;
+    std::filesystem::remove_all(directory, ignored);
 
     ASSERT_FALSE(reason.empty());
-    EXPECT_NE(refusal.find("plugin directory " + directory.string() + " holds libbroken-plugin.so"), std::string::npos)
+    EXPECT_NE(refusal.find("plugin directory " + directory.string() + " holds " + file_name), std::string::npos)
         << refusal;
     EXPECT_NE(refusal.find(reason), std::string::npos) << refusal;
     EXPECT_EQ(refusal.find('\n'), std::string::npos) << refusal;
@@ -741,7 +765,7 @@ TEST_F(Gr4RuntimeManagerTest, ProcessEnvironmentIsLeftUnchanged) {
 }
 
 TEST_F(Gr4RuntimeManagerTest, NoStagingDirectoryIsCreated) {
-    const auto temporary = std::filesystem::temp_directory_path() / std::format("gr4cp-staging-check-{}", ::getpid());
+    const auto temporary = std::filesystem::temp_directory_path() / std::format("gr4cp-staging-check-{}", process_id());
     std::filesystem::create_directories(temporary);
     {
         const ScopedVariable variable("TMPDIR", temporary.string());

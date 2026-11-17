@@ -413,10 +413,11 @@ void expect_single_stream_descriptor(const nlohmann::json& body,
     ASSERT_TRUE(body["streams"].is_array());
     ASSERT_EQ(body["streams"].size(), 1U);
     const auto& stream = body["streams"][0];
-    EXPECT_EQ(stream["id"], id);
-    EXPECT_EQ(stream["block_instance_name"], block_instance_name);
-    EXPECT_EQ(stream["transport"], transport);
-    EXPECT_EQ(stream["payload_format"], payload_format);
+    // compared as std::string: MSVC finds json == std::string_view ambiguous with the reversed string_view candidate
+    EXPECT_EQ(stream["id"], std::string(id));
+    EXPECT_EQ(stream["block_instance_name"], std::string(block_instance_name));
+    EXPECT_EQ(stream["transport"], std::string(transport));
+    EXPECT_EQ(stream["payload_format"], std::string(payload_format));
     EXPECT_EQ(stream["path"], path);
     EXPECT_EQ(stream["ready"], true);
 }
