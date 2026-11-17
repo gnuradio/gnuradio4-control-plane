@@ -1,0 +1,120 @@
+name: Control-plane Windows CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      gnuradio4_core_ref:
+        description: gnuradio/gnuradio4-core ref to build the control plane against
+        required: false
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DISABLE_SENSITIVE_TESTS: "1"
+  GNURADIO4_CORE_REF: ${{ inputs.gnuradio4_core_ref || 'main' }}
+
+jobs:
+  windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest # vs26
+            arch: x64
+          - os: windows-2022 # vs22
+            arch: x64
+          - os: windows-11-arm # vs26 - arm
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    name: "Windows | MSVC | ${{ matrix.os }}"
+    timeout-minutes: 240
+    steps:
+      - name: Check out control-plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Setup VS Dev Prompt
+        uses: step-security/msvc-dev-cmd@22c98154b708dbd743e6f27a933cf6ceba3305c4 # v1.13.1
+        with:
+          arch: ${{ matrix.arch }}
+
+      # There is no Windows SDK image, so the superbuild provides the dependencies of gr-core as well as the control
+      # plane's own. It prepends its prefix to CMAKE_PREFIX_PATH and its bin directory to PATH for the steps below.
+      - name: Build the third-party dependencies
+        id: deps
+        uses: gnuradio/gnuradio4-deps@fa668fc3955e7b5647827027b714aa73ab1f7d2d
+        with:
+          enable-python3: OFF
+          generator: Ninja
+          cmake-args: -DTARGET_GR_CONTROL_PLANE=ON
+
+      - name: Check out gnuradio4-core
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # 7.0.1
+        with:
+          repository: gnuradio/gnuradio4-core
+          ref: ${{ env.GNURADIO4_CORE_REF }}
+          path: gnuradio4-core
+          fetch-depth: 1
+
+      - name: Resolve the gnuradio4-core install
+        id: gr4
+        shell: bash
+        run: |
+          echo "sha=$(git -C gnuradio4-core rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "prefix=${RUNNER_TEMP//\\//}/gnuradio4" >> "$GITHUB_OUTPUT"
+
+      - name: Restore gnuradio4-core
+        id: restore-gr4
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # 5.1
+        with:
+          path: ${{ steps.gr4.outputs.prefix }}
+          # bump the version when the configure below changes
+          key: gnuradio4-core-v1-${{ steps.deps.outputs.cache-key }}-${{ steps.gr4.outputs.sha }}
+
+      # Release, to share the /MD runtime the superbuild builds the dependencies with
+      - name: Build gnuradio4-core
+        if: steps.restore-gr4.outputs.cache-hit != 'true'
+        run: |
+          cmake -S gnuradio4-core -B build-gr4 -G Ninja `
+            -DCMAKE_COLOR_DIAGNOSTICS=ON `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_INSTALL_PREFIX="${{ steps.gr4.outputs.prefix }}" `
+            -DENABLE_TESTING=OFF `
+            -DENABLE_EXAMPLES=OFF
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build build-gr4
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --install build-gr4
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Save gnuradio4-core
+        if: steps.restore-gr4.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # 5.1
+        with:
+          path: ${{ steps.gr4.outputs.prefix }}
+          key: ${{ steps.restore-gr4.outputs.cache-primary-key }}
+
+      # Windows has no rpath: the tests' launcher puts the DLL directories of their imported targets on PATH
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_COLOR_DIAGNOSTICS=ON
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          "-DCMAKE_PREFIX_PATH=${{ steps.gr4.outputs.prefix }};${{ steps.deps.outputs.install-prefix }}"
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Execute tests
+        run: ctest --test-dir build --output-on-failure --timeout 120 --no-tests=error
