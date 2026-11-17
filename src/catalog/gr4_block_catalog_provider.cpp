@@ -21,6 +21,13 @@
 #include <unistd.h>
 #endif
 
+// Blocks are reflected in a forked worker where there is fork(): Windows has none, and WASM has no processes
+#if !defined(__EMSCRIPTEN__) && !defined(_WIN32)
+#define GR4CP_REFLECT_IN_WORKER 1
+#else
+#define GR4CP_REFLECT_IN_WORKER 0
+#endif
+
 #include <gnuradio-4.0/BlockModel.hpp>
 #include <gnuradio-4.0/PluginLoader.hpp>
 #include <gnuradio-4.0/Settings.hpp>
@@ -268,7 +275,7 @@ std::string parameter_summary(const gr::property_map& meta, std::string_view nam
     return "";
 }
 
-#if !defined(__EMSCRIPTEN__)
+#if GR4CP_REFLECT_IN_WORKER
 
 std::string_view cardinality_kind_to_string(domain::BlockPortCardinalityKind kind) {
     switch (kind) {
@@ -288,7 +295,7 @@ std::optional<domain::BlockPortCardinalityKind> cardinality_kind_from_string(std
     return std::nullopt;
 }
 
-#endif  // !defined(__EMSCRIPTEN__)
+#endif  // GR4CP_REFLECT_IN_WORKER
 
 std::optional<int> port_count_lower_bound(std::string_view parameter_name) {
     if (parameter_name == "n_inputs" || parameter_name == "n_outputs" || parameter_name == "n_ports") {
@@ -614,7 +621,8 @@ domain::BlockDescriptor reflect_block(gr::PluginLoader& loader, const std::strin
     };
 }
 
-#if !defined(__EMSCRIPTEN__)
+// The reflection worker hands its result back through a pipe as JSON
+#if GR4CP_REFLECT_IN_WORKER
 
 nlohmann::json to_json(const domain::BlockParameterDefault& value) {
     return std::visit([](const auto& item) -> nlohmann::json { return item; }, value);
@@ -895,6 +903,28 @@ domain::BlockDescriptor reflect_block_in_subprocess(gr::PluginLoader& loader, co
     }
 }
 
+#endif  // GR4CP_REFLECT_IN_WORKER
+
+// Reflects one block so that a block failing to reflect only drops out of the catalog: reflect_all() skips a block
+// that raises CatalogLoadError. The worker also contains a block that crashes; in-process, only exceptions can be.
+domain::BlockDescriptor reflect_block_isolated(gr::PluginLoader& loader, const std::string& id) {
+#if GR4CP_REFLECT_IN_WORKER
+    return reflect_block_in_subprocess(loader, id);
+#else
+    try {
+        return reflect_block(loader, id);
+    } catch (const CatalogLoadError&) {
+        throw;
+    } catch (const std::exception& error) {
+        throw CatalogLoadError("GNU Radio 4 block reflection failed for block " + id + ": " + error.what());
+    } catch (...) {
+        throw CatalogLoadError("GNU Radio 4 block reflection failed for block: " + id);
+    }
+#endif
+}
+
+#if !defined(__EMSCRIPTEN__)
+
 void throw_on_failed_plugins(const gr::PluginLoader& loader) {
     if (const auto failures = runtime::load_failures(loader); !failures.empty()) {
         const auto& [path, error] = failures.front();
@@ -995,11 +1025,7 @@ std::vector<domain::BlockDescriptor> Gr4BlockCatalogProvider::list() const {
     if (blocks.empty()) {
         throw CatalogLoadError("GNU Radio 4 plugin loader found no registered blocks");
     }
-#if defined(__EMSCRIPTEN__)
-    return reflect_all(blocks, [this](const std::string& id) { return reflect_block(*loader_, id); });
-#else
-    return reflect_all(blocks, [this](const std::string& id) { return reflect_block_in_subprocess(*loader_, id); });
-#endif
+    return reflect_all(blocks, [this](const std::string& id) { return reflect_block_isolated(*loader_, id); });
 }
 
 }  // namespace gr4cp::catalog
