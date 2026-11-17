@@ -374,6 +374,11 @@ if(NOT EMSCRIPTEN)
     add_dependencies(gr4cp_smoke_test gr4cp_server)
 
     include(GoogleTest)
+    # gtest_discover_tests() runs each test program after it is built to list its cases. A cross build can't run the
+    # target's programs unless it has an emulator, so leave the listing to ctest, which runs where the tests do.
+    if(CMAKE_CROSSCOMPILING AND NOT CMAKE_CROSSCOMPILING_EMULATOR AND NOT DEFINED CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE)
+        set(CMAKE_GTEST_DISCOVER_TESTS_DISCOVERY_MODE PRE_TEST)
+    endif()
     gtest_discover_tests(gr4cp_smoke_test
         PROPERTIES
             ENVIRONMENT "GR4CP_SERVER_EXECUTABLE=$<TARGET_FILE:gr4cp_server>"
