@@ -119,6 +119,24 @@ TEST(ServerExecutableTest, HelpPrintsUsageAndExitsZero) {
     EXPECT_NE(output.find("GNURADIO4_PLUGIN_DIRECTORIES"), std::string::npos) << output;
 }
 
+// Studio sets GR4CP_STREAM_STDIO=1 for every server it manages, and the server sets up its standard streams before
+// reading its arguments
+TEST(ServerExecutableTest, HelpWithStreamedStdioPrintsUsageAndExitsZero) {
+#if defined(_WIN32)
+    ASSERT_EQ(_putenv_s("GR4CP_STREAM_STDIO", "1"), 0);
+#else
+    ASSERT_EQ(setenv("GR4CP_STREAM_STDIO", "1", 1), 0);
+#endif
+    const auto [status, output] = run_server("--help");
+#if defined(_WIN32)
+    _putenv_s("GR4CP_STREAM_STDIO", "");
+#else
+    unsetenv("GR4CP_STREAM_STDIO");
+#endif
+    EXPECT_EQ(status, 0) << output;
+    EXPECT_TRUE(output.starts_with("Usage: gr4cp_server [--help]")) << output;
+}
+
 TEST(ServerExecutableTest, UnknownArgumentExitsWithUsageError) {
     const auto [status, output] = run_server("--no-such-option");
     EXPECT_EQ(status, 2) << output;

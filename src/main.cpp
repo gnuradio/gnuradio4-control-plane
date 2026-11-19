@@ -31,7 +31,12 @@ void configure_managed_stdio() {
         return;
     }
 
+#if defined(_WIN32)
+    // the MSVC runtime has no line buffering (_IOLBF buffers fully), and it ends the process on a size below 2
+    (void)std::setvbuf(stdout, nullptr, _IONBF, 0);
+#else
     (void)std::setvbuf(stdout, nullptr, _IOLBF, 0);
+#endif
     (void)std::setvbuf(stderr, nullptr, _IONBF, 0);
     std::cout << std::unitbuf;
     std::cerr << std::unitbuf;
