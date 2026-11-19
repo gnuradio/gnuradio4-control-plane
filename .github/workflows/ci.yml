@@ -57,13 +57,14 @@ jobs:
   integration:
     needs: [dco]
     name: ${{ matrix.name }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runs-on }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: Ubuntu 24.04 | GCC 14 | Release
+            runs-on: ubuntu-latest
             blocks_sdk_tag: main-ubuntu-24.04-gcc14-release
             cxx: g++-14
             cmake_build_type: RelWithDebInfo
@@ -71,6 +72,7 @@ jobs:
             linker_flags: ""
             asan_options: ""
           - name: Ubuntu 26.04 | GCC | Release
+            runs-on: ubuntu-latest
             blocks_sdk_tag: main-ubuntu-26.04-gcc-release
             cxx: g++
             cmake_build_type: RelWithDebInfo
@@ -78,6 +80,7 @@ jobs:
             linker_flags: ""
             asan_options: ""
           - name: Ubuntu 26.04 | GCC | Debug
+            runs-on: ubuntu-latest
             blocks_sdk_tag: main-ubuntu-26.04-gcc-debug
             cxx: g++
             cmake_build_type: Debug
@@ -85,6 +88,7 @@ jobs:
             linker_flags: ""
             asan_options: ""
           - name: Ubuntu 24.04 | Clang 20 | Release
+            runs-on: ubuntu-latest
             blocks_sdk_tag: main-ubuntu-24.04-clang20-release
             cxx: clang++-20
             cmake_build_type: RelWithDebInfo
@@ -92,6 +96,7 @@ jobs:
             linker_flags: -fsanitize=address
             asan_options: detect_leaks=0
           - name: Fedora 44 | Clang | Release
+            runs-on: ubuntu-latest
             blocks_sdk_tag: main-fedora-44-clang-release
             cxx: clang++
             cmake_build_type: RelWithDebInfo
@@ -99,6 +104,7 @@ jobs:
             linker_flags: -fsanitize=address
             asan_options: detect_leaks=0
           - name: Fedora 44 | Clang | Debug
+            runs-on: ubuntu-latest
             # The Debug SDK currently aborts in GNU Radio's generated
             # gr::Resampling<> registration under libstdc++ assertions.
             # Keep this consumer build Debug while using the compatible SDK.
@@ -109,11 +115,20 @@ jobs:
             linker_flags: -fsanitize=address
             asan_options: detect_leaks=0
           - name: Ubuntu 24.04 | Emscripten | Release
+            runs-on: ubuntu-latest
             blocks_sdk_tag: main-ubuntu-24.04-emscripten-release
             cxx: em++
             cmake_wrapper: emcmake
             cmake_build_type: Release
             cxx_flags: ""
+            linker_flags: ""
+            asan_options: ""
+          - name: Fedora 44 | GCC | Release | aarch64
+            runs-on: ubuntu-24.04-arm
+            blocks_sdk_tag: main-fedora-44-gcc-release-aarch64
+            cxx: g++
+            cmake_build_type: RelWithDebInfo
+            cxx_flags: -Wno-error=null-dereference
             linker_flags: ""
             asan_options: ""
     container:
